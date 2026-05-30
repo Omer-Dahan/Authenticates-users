@@ -6,7 +6,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from sqlalchemy import select
 
 from database.session import AsyncSessionLocal
-from database.models import Group
+from database.models import Group, GroupAdmin
 from bot.keyboards.settings_kb import main_settings_kb
 from logs import get_logger
 
@@ -14,14 +14,18 @@ logger = get_logger(__name__)
 router = Router()
 
 
-def _groups_kb(groups: list[Group], bot_username: str) -> InlineKeyboardMarkup:
+def _groups_kb(groups: list[Group], bot_username: str, owned_ids: set[int]) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     for g in groups:
-        status = "🟢" if g.is_active else "🔴"
-        title = (g.title or str(g.chat_id))[:30]
+        if g.id in owned_ids:
+            icon = "🟢" if g.is_active else "🔴"
+        else:
+            # Admin in a group configured by another admin
+            icon = "🔑"
+        title = (g.title or str(g.chat_id))[:28]
         builder.row(
             InlineKeyboardButton(
-                text=f"{status} {title}",
+                text=f"{icon} {title}",
                 callback_data=f"start:group:{g.id}",
             )
         )
@@ -51,21 +55,39 @@ async def _send_dashboard(message: Message, bot: Bot, edit: bool = False) -> Non
     bot_username = me.username
 
     async with AsyncSessionLocal() as db:
-        result = await db.execute(
+        # Groups this user owns
+        owner_result = await db.execute(
             select(Group).where(Group.owner_id == user_id, Group.is_banned == False)
         )
-        groups = result.scalars().all()
+        owned_groups = owner_result.scalars().all()
+        owned_ids = {g.id for g in owned_groups}
 
-    logger.info("Dashboard loaded", user_id=user_id, group_count=len(groups), edit=edit)
+        # Groups where this user is a known admin (but not owner)
+        admin_result = await db.execute(
+            select(Group)
+            .join(GroupAdmin, GroupAdmin.group_id == Group.id)
+            .where(
+                GroupAdmin.admin_user_id == user_id,
+                Group.owner_id != user_id,
+                Group.is_banned == False,
+            )
+        )
+        shared_groups = admin_result.scalars().all()
+
+    groups = list(owned_groups) + list(shared_groups)
+
+    logger.info("Dashboard loaded", user_id=user_id, owned=len(owned_groups), shared=len(shared_groups), edit=edit)
 
     if groups:
-        groups_text = "\n".join(
-            f"  {'🟢' if g.is_active else '🔴'} {g.title or g.chat_id}"
-            for g in groups
-        )
+        lines = []
+        for g in owned_groups:
+            lines.append(f"  {'🟢' if g.is_active else '🔴'} {g.title or g.chat_id}")
+        for g in shared_groups:
+            lines.append(f"  🔑 {g.title or g.chat_id} <i>(הוגדר ע\"י אחר)</i>")
         body = (
             f"<b>הקבוצות שלך ({len(groups)}):</b>\n"
-            f"{groups_text}\n\n"
+            + "\n".join(lines)
+            + "\n\n🟢/🔴 = קבוצות שלך  |  🔑 = מנהל בקבוצה של אחר\n\n"
             "לחץ על קבוצה לניהולה:"
         )
     else:
@@ -88,7 +110,7 @@ async def _send_dashboard(message: Message, bot: Bot, edit: bool = False) -> Non
         f"{body}"
     )
 
-    kb = _groups_kb(groups, bot_username)
+    kb = _groups_kb(groups, bot_username, owned_ids)
 
     if edit:
         try:
@@ -121,22 +143,45 @@ async def cb_refresh(callback: CallbackQuery, bot: Bot) -> None:
 @router.callback_query(F.data.startswith("start:group:"))
 async def cb_group_detail(callback: CallbackQuery, bot: Bot) -> None:
     group_id = int(callback.data.split(":")[2])
+    user_id = callback.from_user.id
 
     async with AsyncSessionLocal() as db:
         group = await db.get(Group, group_id)
 
-    if not group or group.owner_id != callback.from_user.id:
-        await callback.answer("קבוצה לא נמצאה.", show_alert=True)
-        return
+        if not group:
+            await callback.answer("קבוצה לא נמצאה.", show_alert=True)
+            return
+
+        is_owner = group.owner_id == user_id
+        if not is_owner:
+            admin_result = await db.execute(
+                select(GroupAdmin).where(
+                    GroupAdmin.group_id == group_id,
+                    GroupAdmin.admin_user_id == user_id,
+                )
+            )
+            if not admin_result.scalar_one_or_none():
+                await callback.answer("אין לך גישה לקבוצה זו.", show_alert=True)
+                return
 
     status = "🟢 פעיל" if group.is_active else "🔴 מושהה"
     username_part = f"@{group.username}" if group.username else str(group.chat_id)
 
+    owner_line = "" if is_owner else f"👤 הוגדר ע\"י: <code>{group.owner_id}</code>\n"
+
+    if group.settings_last_edited_at and group.settings_last_edited_by_name:
+        ts = group.settings_last_edited_at.strftime("%d/%m/%Y %H:%M")
+        last_edited_line = f"✏️ עריכה אחרונה: {group.settings_last_edited_by_name} | {ts}\n"
+    else:
+        last_edited_line = ""
+
     text = (
         f"📋 <b>{group.title or group.chat_id}</b>\n\n"
         f"מזהה: <code>{username_part}</code>\n"
-        f"סטטוס: {status}\n\n"
-        "בחר פעולה:"
+        f"סטטוס: {status}\n"
+        f"{owner_line}"
+        f"{last_edited_line}"
+        "\nבחר פעולה:"
     )
     await callback.message.edit_text(
         text, parse_mode="HTML", reply_markup=main_settings_kb(group_id)

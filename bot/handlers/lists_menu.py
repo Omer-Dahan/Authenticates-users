@@ -10,6 +10,7 @@ from database.models import GroupBlacklist, GroupWhitelist
 from bot.keyboards.settings_kb import (
     blacklist_list_kb, whitelist_list_kb, back_to_main_kb,
 )
+from bot.handlers.admin_utils import mark_settings_edited
 from logs import get_logger
 
 logger = get_logger(__name__)
@@ -60,6 +61,7 @@ async def cb_bl_delete(callback: CallbackQuery) -> None:
         entry = await db.get(GroupBlacklist, entry_id)
         if entry and entry.group_id == group_id:
             await db.delete(entry)
+            await mark_settings_edited(group_id, callback.from_user.id, callback.from_user.username, callback.from_user.first_name, db)
             await db.commit()
             await callback.answer("נמחק.")
         else:
@@ -115,6 +117,7 @@ async def fsm_bl_enter_score(message: Message, state: FSMContext) -> None:
             await message.answer(f"⚠️ המילה '{keyword}' כבר קיימת ברשימה.", reply_markup=back_to_main_kb(group_id))
             return
         db.add(GroupBlacklist(group_id=group_id, keyword=keyword, score=score))
+        await mark_settings_edited(group_id, message.from_user.id, message.from_user.username, message.from_user.first_name, db)
         await db.commit()
 
     await message.answer(
@@ -163,6 +166,7 @@ async def cb_wl_delete(callback: CallbackQuery) -> None:
         entry = await db.get(GroupWhitelist, entry_id)
         if entry and entry.group_id == group_id:
             await db.delete(entry)
+            await mark_settings_edited(group_id, callback.from_user.id, callback.from_user.username, callback.from_user.first_name, db)
             await db.commit()
             await callback.answer("נמחק.")
         else:
@@ -215,6 +219,7 @@ async def fsm_wl_enter_notes(message: Message, state: FSMContext) -> None:
             await message.answer(f"⚠️ המשתמש {telegram_id} כבר ברשימה.", reply_markup=back_to_main_kb(group_id))
             return
         db.add(GroupWhitelist(group_id=group_id, telegram_id=telegram_id, notes=notes))
+        await mark_settings_edited(group_id, message.from_user.id, message.from_user.username, message.from_user.first_name, db)
         await db.commit()
 
     await message.answer(

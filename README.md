@@ -121,7 +121,7 @@ If `tracking_channel_id` is defined, the bot sends rich HTML log alerts detailin
 
 ## 🚀 Getting Started
 
-Read the full installation walkthrough in [SETUP.md](SETUP.md).
+Read the full installation walkthrough in [docs/SETUP.md](docs/SETUP.md).
 
 ### 1. Requirements
 - Python 3.11+
@@ -138,11 +138,11 @@ cp .env.example .env
 # Edit .env and fill in: BOT_TOKEN, SUPER_ADMIN_ID, TRACKING_CHANNEL_ID, etc.
 
 # 3. Seed initial database values
-python setup.py
+python scripts/setup_db.py
 
 # 4. Apply schema migrations
 alembic upgrade head
 
 # 5. Run the bot
-python run_bot.py
+python scripts/run_bot.py
 ```
