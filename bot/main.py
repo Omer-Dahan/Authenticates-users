@@ -14,7 +14,7 @@ from config import settings
 from logs import get_logger, setup_logging
 from database.init_db import init_db
 from moderation import ModerationEngine
-from verification import VerificationEngine
+from verification import VerificationEngine, start_cleanup_loop
 
 from bot.handlers import join_requests, verification, setup, settings_menu
 from bot.handlers import rules_menu, questions_menu, lists_menu, superadmin, start
@@ -70,6 +70,9 @@ async def main() -> None:
     except Exception as e:
         logger.error("Failed to delete webhook — network issue?", error=str(e))
         return
+    # Start background cleanup task for expired verification sessions
+    asyncio.create_task(start_cleanup_loop(bot, interval_seconds=60))
+
     await dp.start_polling(
         bot,
         allowed_updates=[

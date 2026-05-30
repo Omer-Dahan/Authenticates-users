@@ -22,6 +22,7 @@ async def _run_migrations() -> None:
         "ALTER TABLE groups ADD COLUMN settings_last_edited_by_id INTEGER",
         "ALTER TABLE groups ADD COLUMN settings_last_edited_by_name VARCHAR(255)",
         "ALTER TABLE groups ADD COLUMN settings_last_edited_at DATETIME",
+        "ALTER TABLE groups ADD COLUMN is_default_template BOOLEAN DEFAULT 0",
     ]
     async with engine.begin() as conn:
         for sql in new_columns:

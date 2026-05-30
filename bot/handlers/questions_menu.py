@@ -7,20 +7,23 @@ from sqlalchemy import select
 
 from database.session import AsyncSessionLocal
 from database.models import GroupQuestion
-from bot.keyboards.settings_kb import questions_list_kb, yes_no_kb, back_to_main_kb, question_details_kb
+from bot.keyboards.settings_kb import (
+    questions_list_kb, yes_no_kb, back_to_main_kb, question_details_kb,
+    question_editor_kb, cancel_field_edit_kb
+)
 from logs import get_logger
 
 logger = get_logger(__name__)
 router = Router()
 
 
-class AddQuestionState(StatesGroup):
+class QuestionEditState(StatesGroup):
+    menu = State()
     entering_name = State()
     entering_question = State()
     entering_answers = State()
     entering_attempts = State()
     entering_timeout = State()
-    asking_ban_on_fail = State()
     entering_score_pass = State()
     entering_score_fail = State()
 

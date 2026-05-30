@@ -79,16 +79,9 @@ async def _send_dashboard(message: Message, bot: Bot, edit: bool = False) -> Non
     logger.info("Dashboard loaded", user_id=user_id, owned=len(owned_groups), shared=len(shared_groups), edit=edit)
 
     if groups:
-        lines = []
-        for g in owned_groups:
-            lines.append(f"  {'🟢' if g.is_active else '🔴'} {g.title or g.chat_id}")
-        for g in shared_groups:
-            lines.append(f"  🔑 {g.title or g.chat_id} <i>(הוגדר ע\"י אחר)</i>")
         body = (
-            f"<b>הקבוצות שלך ({len(groups)}):</b>\n"
-            + "\n".join(lines)
-            + "\n\n🟢/🔴 = קבוצות שלך  |  🔑 = מנהל בקבוצה של אחר\n\n"
-            "לחץ על קבוצה לניהולה:"
+            "🟢/🔴 = קבוצות שלך  |  🔑 = מנהל בקבוצה של אחר\n\n"
+            "לחץ על קבוצה מטה לניהולה:"
         )
     else:
         body = (
@@ -105,7 +98,6 @@ async def _send_dashboard(message: Message, bot: Bot, edit: bool = False) -> Non
         "🔍 שאלות אימות\n"
         "📋 רשימות שחור ולבן\n"
         "🛡️ מצבי אבטחה: רגיל / קפדני / נעילה\n\n"
-        "📖 <a href='https://telegra.ph/מדריך-למשתמש-ושאלות-נפוצות---בוט-סינון-הצטרפות-05-30-2'>מדריך למשתמש ושאלות נפוצות</a>\n\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
         f"{body}"
     )

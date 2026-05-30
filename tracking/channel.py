@@ -52,7 +52,7 @@ async def send_decision(
     username_str = f"@{username}" if username else "—"
     now = datetime.now(timezone.utc).strftime("%d/%m/%Y %H:%M:%S")
 
-    if decision == DecisionEnum.banned and reason:
+    if decision in (DecisionEnum.banned, DecisionEnum.rejected) and reason:
         text = (
             f"{icon} | 📍 {group_str}\n"
             f"👤 {user_name} | ID: <code>{user_id}</code>\n"
