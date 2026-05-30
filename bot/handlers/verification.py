@@ -1,7 +1,8 @@
-"""Handles verification answer messages in private chat — multi-tenant."""
+﻿"""Handles verification answer messages in private chat — multi-tenant."""
 from datetime import datetime, timezone
 
 from aiogram import Router, Bot, F
+from aiogram.exceptions import TelegramAPIError
 from aiogram.types import Message
 from sqlalchemy import select
 
@@ -17,14 +18,14 @@ from logs import get_logger
 logger = get_logger(__name__)
 router = Router()
 
-_moderation_engine: ModerationEngine | None = None
-_verification_engine: VerificationEngine | None = None
+_MODERATION_ENGINE: ModerationEngine | None = None
+_VERIFICATION_ENGINE: VerificationEngine | None = None
 
 
 def setup_engines(mod_engine: ModerationEngine, ver_engine: VerificationEngine) -> None:
-    global _moderation_engine, _verification_engine
-    _moderation_engine = mod_engine
-    _verification_engine = ver_engine
+    global _MODERATION_ENGINE, _VERIFICATION_ENGINE  # pylint: disable=global-statement
+    _MODERATION_ENGINE = mod_engine
+    _VERIFICATION_ENGINE = ver_engine
 
 
 async def _get_config_msg(group_id: int, key: str, db) -> str | None:
@@ -59,20 +60,20 @@ async def handle_verification_answer(message: Message, bot: Bot) -> None:
         chat_id = join_req.chat_id
         group_id = join_req.group_id
 
-        session = await _verification_engine.get_active_session(user_id, chat_id, db)
+        session = await _VERIFICATION_ENGINE.get_active_session(user_id, chat_id, db)
 
         if not session:
             await message.reply("⏰ תוקף האימות פג. שלח בקשת הצטרפות חדשה.")
             try:
                 await bot.decline_chat_join_request(chat_id, user_id)
-            except Exception:
+            except TelegramAPIError:
                 pass
             join_req.decision = DecisionEnum.rejected
             join_req.resolved_at = datetime.now(timezone.utc)
             await db.commit()
             return
 
-        passed, reply_text, verification_score = await _verification_engine.submit_answer(
+        passed, reply_text, verification_score = await _VERIFICATION_ENGINE.submit_answer(
             session, text, db
         )
         await message.reply(reply_text)
@@ -90,7 +91,7 @@ async def handle_verification_answer(message: Message, bot: Bot) -> None:
             "username": (user_result.username or "") if user_result else "",
         }
 
-        final_result = await _moderation_engine.evaluate(
+        final_result = await _MODERATION_ENGINE.evaluate(
             user_data, db, group_id=group_id, verification_score=verification_score
         )
 
@@ -98,14 +99,14 @@ async def handle_verification_answer(message: Message, bot: Bot) -> None:
         group = await db.get(Group, group_id) if group_id else None
 
         ban_user = final_result.decision == DecisionEnum.banned or (
-            not passed and await _verification_engine.should_ban(session, db)
+            not passed and await _VERIFICATION_ENGINE.should_ban(session, db)
         )
 
         if ban_user:
             try:
                 await bot.ban_chat_member(chat_id, user_id)
                 await bot.decline_chat_join_request(chat_id, user_id)
-            except Exception as e:
+            except TelegramAPIError as e:
                 logger.error("Error banning after failed verification", error=str(e))
             join_req.decision = DecisionEnum.banned
 
@@ -116,9 +117,9 @@ async def handle_verification_answer(message: Message, bot: Bot) -> None:
                 if approve_msg:
                     try:
                         await bot.send_message(user_id, approve_msg)
-                    except Exception:
+                    except TelegramAPIError:
                         pass
-            except Exception as e:
+            except TelegramAPIError as e:
                 logger.error("Error approving after verification", error=str(e))
             join_req.decision = DecisionEnum.approved
 
@@ -129,9 +130,9 @@ async def handle_verification_answer(message: Message, bot: Bot) -> None:
                 if reject_msg:
                     try:
                         await bot.send_message(user_id, reject_msg)
-                    except Exception:
+                    except TelegramAPIError:
                         pass
-            except Exception as e:
+            except TelegramAPIError as e:
                 logger.error("Error declining after verification", error=str(e))
             join_req.decision = DecisionEnum.rejected
 

@@ -1,4 +1,4 @@
-"""Inline keyboard builders for the settings menu system."""
+﻿"""Inline keyboard builders for the settings menu system."""
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
@@ -134,9 +134,9 @@ def question_details_kb(group_id: int, q_id: int, is_enabled: bool) -> InlineKey
     return builder.as_markup()
 
 
-def question_editor_kb(group_id: int, data: dict) -> InlineKeyboardMarkup:
+def question_editor_kb(data: dict) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
-    
+
     name = data.get("name") or "ללא שם"
     question = data.get("question") or "ריק"
     q_preview = question[:20] + "..." if len(question) > 20 else question
@@ -147,28 +147,28 @@ def question_editor_kb(group_id: int, data: dict) -> InlineKeyboardMarkup:
     ban = "כן" if data.get("ban_on_fail") else "לא"
     score_pass = data.get("score_on_pass", 100.0)
     score_fail = data.get("score_on_fail", -100.0)
-    
-    builder.row(InlineKeyboardButton(text=f"🏷️ שם: {name}", callback_data=f"q_edit:field:name"))
-    builder.row(InlineKeyboardButton(text=f"📝 שאלה: {q_preview}", callback_data=f"q_edit:field:question"))
-    builder.row(InlineKeyboardButton(text=f"🔑 תשובות: {ans_preview}", callback_data=f"q_edit:field:answers"))
-    
+
+    builder.row(InlineKeyboardButton(text=f"🏷️ שם: {name}", callback_data="q_edit:field:name"))
+    builder.row(InlineKeyboardButton(text=f"📝 שאלה: {q_preview}", callback_data="q_edit:field:question"))
+    builder.row(InlineKeyboardButton(text=f"🔑 תשובות: {ans_preview}", callback_data="q_edit:field:answers"))
+
     builder.row(
-        InlineKeyboardButton(text=f"🔢 ניסיונות: {attempts}", callback_data=f"q_edit:field:attempts"),
-        InlineKeyboardButton(text=f"⏱️ זמן: {timeout}ש", callback_data=f"q_edit:field:timeout"),
+        InlineKeyboardButton(text=f"🔢 ניסיונות: {attempts}", callback_data="q_edit:field:attempts"),
+        InlineKeyboardButton(text=f"⏱️ זמן: {timeout}ש", callback_data="q_edit:field:timeout"),
     )
     builder.row(
-        InlineKeyboardButton(text=f"🚫 חסימה בכישלון: {ban}", callback_data=f"q_edit:toggle:ban"),
+        InlineKeyboardButton(text=f"🚫 חסימה בכישלון: {ban}", callback_data="q_edit:toggle:ban"),
     )
     builder.row(
-        InlineKeyboardButton(text=f"🟢 עובר: {score_pass:+.0f}", callback_data=f"q_edit:field:score_pass"),
-        InlineKeyboardButton(text=f"🔴 נכשל: {score_fail:+.0f}", callback_data=f"q_edit:field:score_fail"),
+        InlineKeyboardButton(text=f"🟢 עובר: {score_pass:+.0f}", callback_data="q_edit:field:score_pass"),
+        InlineKeyboardButton(text=f"🔴 נכשל: {score_fail:+.0f}", callback_data="q_edit:field:score_fail"),
     )
-    
+
     builder.row(
-        InlineKeyboardButton(text="💾 שמור", callback_data=f"q_edit:action:save"),
-        InlineKeyboardButton(text="❌ ביטול", callback_data=f"q_edit:action:cancel"),
+        InlineKeyboardButton(text="💾 שמור", callback_data="q_edit:action:save"),
+        InlineKeyboardButton(text="❌ ביטול", callback_data="q_edit:action:cancel"),
     )
-    
+
     return builder.as_markup()
 
 

@@ -1,8 +1,9 @@
-"""Handles chat_join_request events — multi-tenant moderation flow."""
+﻿"""Handles chat_join_request events — multi-tenant moderation flow."""
 from datetime import datetime, timezone
 from typing import Optional
 
 from aiogram import Router, Bot
+from aiogram.exceptions import TelegramAPIError
 from aiogram.types import ChatJoinRequest
 
 from database.session import AsyncSessionLocal
@@ -20,14 +21,14 @@ from logs import get_logger
 logger = get_logger(__name__)
 router = Router()
 
-_moderation_engine: Optional[ModerationEngine] = None
-_verification_engine: Optional[VerificationEngine] = None
+_MODERATION_ENGINE: Optional[ModerationEngine] = None
+_VERIFICATION_ENGINE: Optional[VerificationEngine] = None
 
 
 def setup_engines(mod_engine: ModerationEngine, ver_engine: VerificationEngine) -> None:
-    global _moderation_engine, _verification_engine
-    _moderation_engine = mod_engine
-    _verification_engine = ver_engine
+    global _MODERATION_ENGINE, _VERIFICATION_ENGINE  # pylint: disable=global-statement
+    _MODERATION_ENGINE = mod_engine
+    _VERIFICATION_ENGINE = ver_engine
 
 
 async def _ensure_user(user, db) -> TelegramUser:
@@ -65,7 +66,7 @@ async def _get_config_value(group_id: int, key: str, default, db) -> any:
 async def _send_message_safe(bot: Bot, user_id: int, text: str) -> None:
     try:
         await bot.send_message(user_id, text, parse_mode="HTML")
-    except Exception as e:
+    except TelegramAPIError as e:
         logger.warning("Could not send message to user", user_id=user_id, error=str(e))
 
 
@@ -93,7 +94,7 @@ async def _notify_manual_review(
     # Send to group owner
     try:
         await bot.send_message(group.owner_id, text, parse_mode="HTML", reply_markup=kb)
-    except Exception as e:
+    except TelegramAPIError as e:
         logger.error("Failed to notify owner for review", error=str(e))
 
 
@@ -128,7 +129,7 @@ async def handle_join_request(
     )
 
     async with AsyncSessionLocal() as db:
-        db_user = await _ensure_user(user, db)
+        await _ensure_user(user, db)
 
         user_data = {
             "user_id": user.id,
@@ -137,7 +138,7 @@ async def handle_join_request(
             "username": user.username or "",
         }
 
-        scoring_result = await _moderation_engine.evaluate(
+        scoring_result = await _MODERATION_ENGINE.evaluate(
             user_data, db, group_id=group.id, raid_active=raid_active
         )
 
@@ -162,7 +163,7 @@ async def handle_join_request(
             try:
                 await bot.ban_chat_member(chat_id, user.id)
                 await bot.decline_chat_join_request(chat_id, user.id)
-            except Exception as e:
+            except TelegramAPIError as e:
                 logger.error("Error banning user", user_id=user.id, error=str(e))
             join_req.decision = DecisionEnum.banned
             join_req.resolved_at = datetime.now(timezone.utc)
@@ -188,7 +189,7 @@ async def handle_join_request(
                 welcome = await _get_config_value(group.id, "welcome_message", None, db)
                 if welcome:
                     await _send_message_safe(bot, user.id, welcome)
-            except Exception as e:
+            except TelegramAPIError as e:
                 logger.error("Error approving user", user_id=user.id, error=str(e))
             join_req.decision = DecisionEnum.approved
             join_req.resolved_at = datetime.now(timezone.utc)
@@ -226,9 +227,9 @@ async def handle_join_request(
             return
 
         if scoring_result.requires_verification:
-            question = await _verification_engine.get_random_question(group.id, db)
+            question = await _VERIFICATION_ENGINE.get_random_question(group.id, db)
             if question:
-                await _verification_engine.create_session(user.id, chat_id, question, db)
+                await _VERIFICATION_ENGINE.create_session(user.id, chat_id, question, db)
                 try:
                     await bot.send_message(
                         user.id,
@@ -236,20 +237,20 @@ async def handle_join_request(
                         f"יש לך {question.max_attempts} ניסיון/ות ו-{question.timeout_seconds // 60} דקות לענות.",
                         parse_mode="HTML",
                     )
-                except Exception as e:
+                except TelegramAPIError as e:
                     logger.error("Could not send verification question", user_id=user.id, error=str(e))
             else:
                 # No questions configured — decide by score
                 if scoring_result.total_score >= 0:
                     try:
                         await bot.approve_chat_join_request(chat_id, user.id)
-                    except Exception:
+                    except TelegramAPIError:
                         pass
                     join_req.decision = DecisionEnum.approved
                 else:
                     try:
                         await bot.decline_chat_join_request(chat_id, user.id)
-                    except Exception:
+                    except TelegramAPIError:
                         pass
                     join_req.decision = DecisionEnum.rejected
                 join_req.resolved_at = datetime.now(timezone.utc)
@@ -267,7 +268,7 @@ async def handle_join_request(
         # Default: reject
         try:
             await bot.decline_chat_join_request(chat_id, user.id)
-        except Exception as e:
+        except TelegramAPIError as e:
             logger.error("Error declining user", user_id=user.id, error=str(e))
         join_req.decision = DecisionEnum.rejected
         join_req.resolved_at = datetime.now(timezone.utc)

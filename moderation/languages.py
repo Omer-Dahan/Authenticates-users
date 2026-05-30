@@ -21,7 +21,7 @@ async def detect_languages(
     result = await db.execute(
         select(GroupLanguageFilter).where(
             GroupLanguageFilter.group_id == group_id,
-            GroupLanguageFilter.enabled == True,
+            GroupLanguageFilter.enabled,
         )
     )
     filters = result.scalars().all()

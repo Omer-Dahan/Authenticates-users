@@ -3,6 +3,7 @@ from datetime import datetime, timezone
 from typing import Optional, List
 
 from aiogram import Bot
+from aiogram.exceptions import TelegramAPIError
 from database.models import DecisionEnum
 from config import settings
 from logs import get_logger
@@ -74,5 +75,5 @@ async def send_decision(
 
     try:
         await bot.send_message(settings.tracking_channel_id, text, parse_mode="HTML")
-    except Exception as e:
+    except TelegramAPIError as e:
         logger.error("Failed to send tracking message", error=str(e))

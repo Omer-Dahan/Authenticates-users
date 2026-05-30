@@ -1,5 +1,6 @@
-"""Private-chat /start command — bot info + group management dashboard."""
+﻿"""Private-chat /start command — bot info + group management dashboard."""
 from aiogram import Router, Bot, F
+from aiogram.exceptions import TelegramAPIError
 from aiogram.filters import CommandStart
 from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from aiogram.utils.keyboard import InlineKeyboardBuilder
@@ -57,7 +58,7 @@ async def _send_dashboard(message: Message, bot: Bot, edit: bool = False) -> Non
     async with AsyncSessionLocal() as db:
         # Groups this user owns
         owner_result = await db.execute(
-            select(Group).where(Group.owner_id == user_id, Group.is_banned == False)
+            select(Group).where(Group.owner_id == user_id, ~Group.is_banned)
         )
         owned_groups = owner_result.scalars().all()
         owned_ids = {g.id for g in owned_groups}
@@ -69,7 +70,7 @@ async def _send_dashboard(message: Message, bot: Bot, edit: bool = False) -> Non
             .where(
                 GroupAdmin.admin_user_id == user_id,
                 Group.owner_id != user_id,
-                Group.is_banned == False,
+                ~Group.is_banned,
             )
         )
         shared_groups = admin_result.scalars().all()
@@ -107,7 +108,7 @@ async def _send_dashboard(message: Message, bot: Bot, edit: bool = False) -> Non
     if edit:
         try:
             await message.edit_text(text, parse_mode="HTML", reply_markup=kb)
-        except Exception:
+        except TelegramAPIError:
             await message.answer(text, parse_mode="HTML", reply_markup=kb)
     else:
         await message.answer(text, parse_mode="HTML", reply_markup=kb)

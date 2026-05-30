@@ -1,39 +1,22 @@
 """Utility to clone settings from one group to another."""
-from sqlalchemy import select, delete
+from sqlalchemy import select, delete, func
 from database.models import (
     GroupConfig, GroupRule, GroupQuestion, GroupLanguageFilter, GroupBlacklist
 )
 
-async def are_settings_different(source_group_id: int, target_group_id: int, session) -> bool:
-    """Check if the source group settings are different from the target group settings by comparing counts."""
-    diff_found = False
-    
-    for model in [GroupConfig, GroupRule, GroupQuestion, GroupLanguageFilter, GroupBlacklist]:
-        source_count = await session.scalar(
-            select(model).where(model.group_id == source_group_id).with_only_columns(model.id).order_by(None).with_only_columns(lambda: 1)
-        ) # this is rough. A better count is func.count(model.id)
-        pass
+_MODELS = [GroupConfig, GroupRule, GroupQuestion, GroupLanguageFilter, GroupBlacklist]
 
-    # A simpler approach: just fetch all counts
-    from sqlalchemy import func
-    
-    for model in [GroupConfig, GroupRule, GroupQuestion, GroupLanguageFilter, GroupBlacklist]:
+
+async def are_settings_different(source_group_id: int, target_group_id: int, session) -> bool:
+    """Return True if row counts differ between source and target across all setting tables."""
+    for model in _MODELS:
         sc = await session.scalar(select(func.count(model.id)).where(model.group_id == source_group_id))
         tc = await session.scalar(select(func.count(model.id)).where(model.group_id == target_group_id))
         if sc != tc:
             return True
-            
-    # Even if counts are equal, content might be different, but for warning purposes,
-    # if the counts differ we know it's different. If they are the same, we'll just say "Settings might be identical or differ in values"
-    # Actually, to be safe, any import operation could be destructive, so let's just always return True if they are not the same exact rows, 
-    # but the user asked "only if there is a difference".
-    # Since checking deep difference is hard, we can assume they are different if any row count differs or just return True.
-    # To keep it simple: we check counts. If counts match, we'll still show warning but say "values may change".
     return True
 
 async def get_difference_summary(source_group_id: int, target_group_id: int, session) -> str:
-    from sqlalchemy import func
-    
     models_labels = [
         (GroupConfig, "הגדרות"),
         (GroupRule, "כללים"),

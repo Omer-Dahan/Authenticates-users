@@ -74,12 +74,12 @@ async def evaluate_rules(
 ) -> List[RuleMatch]:
     """Load enabled rules for group and evaluate against user_data."""
     rules_result = await db.execute(
-        select(GroupRule).where(GroupRule.group_id == group_id, GroupRule.enabled == True)
+        select(GroupRule).where(GroupRule.group_id == group_id, GroupRule.enabled)
     )
     rules = rules_result.scalars().all()
 
     blacklist_result = await db.execute(
-        select(GroupBlacklist).where(GroupBlacklist.group_id == group_id, GroupBlacklist.enabled == True)
+        select(GroupBlacklist).where(GroupBlacklist.group_id == group_id, GroupBlacklist.enabled)
     )
     blacklist = blacklist_result.scalars().all()
 

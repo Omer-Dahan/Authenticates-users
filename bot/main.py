@@ -1,11 +1,13 @@
-"""Bot entry point — multi-tenant setup."""
+﻿"""Bot entry point — multi-tenant setup."""
 import asyncio
 import sys
 import os
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+# pylint: disable=wrong-import-position
 from aiogram import Bot, Dispatcher
+from aiogram.exceptions import TelegramAPIError
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.fsm.storage.memory import MemoryStorage
@@ -67,7 +69,7 @@ async def main() -> None:
     logger.info("Bot starting...", mode="polling")
     try:
         await bot.delete_webhook(drop_pending_updates=True)
-    except Exception as e:
+    except TelegramAPIError as e:
         logger.error("Failed to delete webhook — network issue?", error=str(e))
         return
     # Start background cleanup task for expired verification sessions

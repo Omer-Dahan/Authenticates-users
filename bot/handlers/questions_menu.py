@@ -1,4 +1,4 @@
-"""FSM-based verification question management through the bot."""
+﻿"""FSM-based verification question management through the bot."""
 from aiogram import Router, F
 from aiogram.types import CallbackQuery, Message
 from aiogram.fsm.context import FSMContext
@@ -8,7 +8,7 @@ from sqlalchemy import select
 from database.session import AsyncSessionLocal
 from database.models import GroupQuestion
 from bot.keyboards.settings_kb import (
-    questions_list_kb, yes_no_kb, back_to_main_kb, question_details_kb,
+    questions_list_kb, question_details_kb,
     question_editor_kb, cancel_field_edit_kb
 )
 from logs import get_logger
@@ -173,7 +173,7 @@ async def _show_editor_menu(message_or_callback, state: FSMContext) -> None:
     data = await state.get_data()
     group_id = data["group_id"]
     editing_q_id = data.get("editing_q_id")
-    
+
     name = data.get("name") or "ללא שם"
     question = data.get("question") or "ריק"
     answers = ", ".join(data.get("accepted_answers", []))
@@ -182,9 +182,9 @@ async def _show_editor_menu(message_or_callback, state: FSMContext) -> None:
     ban_text = "כן" if data.get("ban_on_fail") else "לא"
     score_pass = data.get("score_on_pass", 100.0)
     score_fail = data.get("score_on_fail", -100.0)
-    
+
     mode_title = "✏️ עריכת שאלת אימות" if editing_q_id else "❓ שאלת אימות חדשה"
-    
+
     text = (
         f"<b>{mode_title}</b>\n\n"
         f"🏷️ <b>שם השאלה:</b> {name}\n"
@@ -197,9 +197,9 @@ async def _show_editor_menu(message_or_callback, state: FSMContext) -> None:
         f"🔴 <b>ניקוד (כישלון):</b> {score_fail:+.0f}\n\n"
         f"לחץ על הכפתורים מטה כדי לערוך שדות ספציפיים, ולבסוף לחץ על <b>שמור</b>."
     )
-    
-    kb = question_editor_kb(group_id, data)
-    
+
+    kb = question_editor_kb(data)
+
     if isinstance(message_or_callback, CallbackQuery):
         await message_or_callback.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
     else:
@@ -209,7 +209,7 @@ async def _show_editor_menu(message_or_callback, state: FSMContext) -> None:
 @router.callback_query(F.data.startswith("q:add:"))
 async def cb_question_add_start(callback: CallbackQuery, state: FSMContext) -> None:
     group_id = int(callback.data.split(":")[2])
-    
+
     await state.set_state(QuestionEditState.menu)
     await state.update_data(
         group_id=group_id,
@@ -223,7 +223,7 @@ async def cb_question_add_start(callback: CallbackQuery, state: FSMContext) -> N
         score_on_pass=100.0,
         score_on_fail=-100.0,
     )
-    
+
     await _show_editor_menu(callback, state)
     await callback.answer()
 
@@ -233,13 +233,13 @@ async def cb_question_edit(callback: CallbackQuery, state: FSMContext) -> None:
     parts = callback.data.split(":")
     group_id = int(parts[2])
     q_id = int(parts[3])
-    
+
     async with AsyncSessionLocal() as db:
         q = await db.get(GroupQuestion, q_id)
         if not q or q.group_id != group_id:
             await callback.answer("שאלה לא נמצאה.")
             return
-        
+
         await state.set_state(QuestionEditState.menu)
         await state.update_data(
             group_id=group_id,
@@ -253,7 +253,7 @@ async def cb_question_edit(callback: CallbackQuery, state: FSMContext) -> None:
             score_on_pass=q.score_on_pass,
             score_on_fail=q.score_on_fail,
         )
-    
+
     await _show_editor_menu(callback, state)
     await callback.answer()
 
@@ -262,7 +262,7 @@ async def cb_question_edit(callback: CallbackQuery, state: FSMContext) -> None:
 async def cb_question_edit_select_field(callback: CallbackQuery, state: FSMContext) -> None:
     field = callback.data.split(":")[2]
     data = await state.get_data()
-    
+
     if field == "name":
         await state.set_state(QuestionEditState.entering_name)
         await callback.message.edit_text(
@@ -328,7 +328,7 @@ async def cb_question_edit_select_field(callback: CallbackQuery, state: FSMConte
             parse_mode="HTML",
             reply_markup=cancel_field_edit_kb()
         )
-    
+
     await callback.answer()
 
 
@@ -347,7 +347,7 @@ async def cb_question_edit_action(callback: CallbackQuery, state: FSMContext) ->
     data = await state.get_data()
     group_id = data["group_id"]
     editing_q_id = data.get("editing_q_id")
-    
+
     if action == "save":
         async with AsyncSessionLocal() as db:
             if editing_q_id:
@@ -382,13 +382,13 @@ async def cb_question_edit_action(callback: CallbackQuery, state: FSMContext) ->
                 await db.commit()
                 editing_q_id = q.id
                 await callback.answer("✅ שאלה חדשה נוצרה בהצלחה.")
-        
+
         await state.clear()
         if editing_q_id:
             await _show_question_details(callback, group_id, editing_q_id)
         else:
             await _show_questions(callback, group_id)
-            
+
     elif action == "cancel":
         await state.clear()
         await callback.answer("העריכה בוטלה.")

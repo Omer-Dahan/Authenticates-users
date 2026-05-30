@@ -1,5 +1,6 @@
-"""Super-admin panel — only accessible by SUPER_ADMIN_ID."""
+﻿"""Super-admin panel — only accessible by SUPER_ADMIN_ID."""
 from aiogram import Router, F, Bot
+from aiogram.exceptions import TelegramAPIError
 from aiogram.filters import Command
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.utils.keyboard import InlineKeyboardBuilder
@@ -56,7 +57,7 @@ async def cmd_admin(message: Message) -> None:
     async with AsyncSessionLocal() as db:
         total_groups = await db.scalar(select(func.count(Group.id)))
         active_groups = await db.scalar(
-            select(func.count(Group.id)).where(Group.is_active == True, Group.is_banned == False)
+            select(func.count(Group.id)).where(Group.is_active, ~Group.is_banned)
         )
         total_requests = await db.scalar(select(func.count(JoinRequest.id)))
         approved = await db.scalar(
@@ -94,7 +95,7 @@ async def cb_admin_main(callback: CallbackQuery) -> None:
     async with AsyncSessionLocal() as db:
         total_groups = await db.scalar(select(func.count(Group.id)))
         active_groups = await db.scalar(
-            select(func.count(Group.id)).where(Group.is_active == True, Group.is_banned == False)
+            select(func.count(Group.id)).where(Group.is_active, ~Group.is_banned)
         )
         total_requests = await db.scalar(select(func.count(JoinRequest.id)))
         approved = await db.scalar(
@@ -365,7 +366,7 @@ async def cmd_broadcast(message: Message, bot: Bot) -> None:
 
     async with AsyncSessionLocal() as db:
         result = await db.execute(
-            select(Group).where(Group.is_active == True, Group.is_banned == False)
+            select(Group).where(Group.is_active, ~Group.is_banned)
         )
         groups = result.scalars().all()
 
@@ -378,7 +379,7 @@ async def cmd_broadcast(message: Message, bot: Bot) -> None:
                 parse_mode="HTML",
             )
             sent += 1
-        except Exception:
+        except TelegramAPIError:
             pass
 
     await message.reply(f"✅ הודעה נשלחה ל-{sent}/{len(groups)} מנהלים.")

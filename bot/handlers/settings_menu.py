@@ -1,7 +1,8 @@
-"""Main settings menu, security mode, thresholds, stats, and manual review callbacks."""
+﻿"""Main settings menu, security mode, thresholds, stats, and manual review callbacks."""
 from datetime import datetime, timezone
 
 from aiogram import Router, Bot, F
+from aiogram.exceptions import TelegramAPIError
 from aiogram.filters import Command
 from aiogram.types import Message, CallbackQuery
 from sqlalchemy import select, func
@@ -17,7 +18,6 @@ from bot.keyboards.settings_kb import (
     import_list_kb, import_confirm_kb,
 )
 from bot.handlers.admin_utils import register_group_admin, mark_settings_edited
-from config import settings
 from logs import get_logger
 
 logger = get_logger(__name__)
@@ -28,7 +28,7 @@ async def _is_chat_admin(bot: Bot, chat_id: int, user_id: int) -> bool:
     try:
         member = await bot.get_chat_member(chat_id, user_id)
         return member.status in ("administrator", "creator")
-    except Exception:
+    except TelegramAPIError:
         return False
 
 
@@ -86,7 +86,7 @@ async def cmd_settings(message: Message, bot: Bot) -> None:
             reply_markup=main_settings_kb(group.id),
         )
         await message.reply("📬 שלחתי לך הודעה פרטית עם ההגדרות.")
-    except Exception:
+    except TelegramAPIError:
         await message.reply(
             f"⚙️ <b>הגדרות קבוצה: {group.title}</b>\n\nבחר אפשרות:",
             parse_mode="HTML",
@@ -291,7 +291,7 @@ async def cmd_threshold(message: Message) -> None:
     }
 
     if key not in valid_keys:
-        await message.reply(f"מפתח לא חוקי. מפתחות אפשריים:\n" + "\n".join(valid_keys))
+        await message.reply("מפתח לא חוקי. מפתחות אפשריים:\n" + "\n".join(valid_keys))
         return
 
     try:
@@ -303,7 +303,7 @@ async def cmd_threshold(message: Message) -> None:
     user_id = message.from_user.id
     async with AsyncSessionLocal() as db:
         result = await db.execute(
-            select(Group).where(Group.owner_id == user_id, Group.is_active == True)
+            select(Group).where(Group.owner_id == user_id, Group.is_active)
         )
         groups = result.scalars().all()
 
@@ -327,7 +327,6 @@ async def cb_manual_review(callback: CallbackQuery, bot: Bot) -> None:
     action = parts[1]
     user_id = int(parts[2])
     join_request_id = int(parts[3])
-    group_id = int(parts[4]) if len(parts) > 4 else 0
 
     async with AsyncSessionLocal() as db:
         join_req = await db.get(JoinRequest, join_request_id)
@@ -340,7 +339,7 @@ async def cb_manual_review(callback: CallbackQuery, bot: Bot) -> None:
         if action == "approve":
             try:
                 await bot.approve_chat_join_request(join_req.chat_id, user_id)
-            except Exception as e:
+            except TelegramAPIError as e:
                 await callback.answer(f"שגיאה: {e}")
                 return
             join_req.decision = DecisionEnum.approved
@@ -349,7 +348,7 @@ async def cb_manual_review(callback: CallbackQuery, bot: Bot) -> None:
         elif action == "reject":
             try:
                 await bot.decline_chat_join_request(join_req.chat_id, user_id)
-            except Exception as e:
+            except TelegramAPIError as e:
                 await callback.answer(f"שגיאה: {e}")
                 return
             join_req.decision = DecisionEnum.rejected
@@ -359,7 +358,7 @@ async def cb_manual_review(callback: CallbackQuery, bot: Bot) -> None:
             try:
                 await bot.ban_chat_member(join_req.chat_id, user_id)
                 await bot.decline_chat_join_request(join_req.chat_id, user_id)
-            except Exception as e:
+            except TelegramAPIError as e:
                 await callback.answer(f"שגיאה: {e}")
                 return
             join_req.decision = DecisionEnum.banned
@@ -389,7 +388,7 @@ async def cb_manual_review(callback: CallbackQuery, bot: Bot) -> None:
             callback.message.text + f"\n\n{label} על ידי @{reviewer}",
             parse_mode="HTML",
         )
-    except Exception:
+    except TelegramAPIError:
         pass
 
 

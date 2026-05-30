@@ -6,7 +6,7 @@ from aiogram.fsm.state import State, StatesGroup
 from sqlalchemy import select
 
 from database.session import AsyncSessionLocal
-from database.models import GroupRule, RuleTypeEnum, RuleTargetEnum
+from database.models import GroupRule
 from bot.keyboards.settings_kb import rules_list_kb, rule_type_kb, rule_target_kb, back_to_main_kb
 from bot.handlers.admin_utils import mark_settings_edited
 from logs import get_logger
@@ -140,7 +140,6 @@ async def cb_rule_choose_type(callback: CallbackQuery, state: FSMContext) -> Non
 @router.callback_query(F.data.startswith("rule:target:"), AddRuleState.choosing_target)
 async def cb_rule_choose_target(callback: CallbackQuery, state: FSMContext) -> None:
     parts = callback.data.split(":")
-    group_id = int(parts[2])
     target = parts[3]
 
     data = await state.get_data()

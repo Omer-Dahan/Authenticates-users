@@ -1,5 +1,6 @@
-"""Group registration flow: bot-added event + /setup command."""
+﻿"""Group registration flow: bot-added event + /setup command."""
 from aiogram import Router, Bot, F
+from aiogram.exceptions import TelegramAPIError
 from aiogram.filters import Command
 from aiogram.types import Message, ChatMemberUpdated
 
@@ -19,7 +20,7 @@ async def _is_chat_admin(bot: Bot, chat_id: int, user_id: int) -> bool:
     try:
         member = await bot.get_chat_member(chat_id, user_id)
         return member.status in ("administrator", "creator")
-    except Exception:
+    except TelegramAPIError:
         return False
 
 
@@ -59,7 +60,7 @@ async def bot_added_to_group(event: ChatMemberUpdated, bot: Bot) -> None:
             group_db_id = group.id
 
             default_group = await db.scalar(
-                select(Group).where(Group.owner_id == adder_id, Group.is_default_template == True)
+                select(Group).where(Group.owner_id == adder_id, Group.is_default_template)
             )
             if default_group:
                 await clone_group_settings(default_group.id, group_db_id, db)
@@ -78,7 +79,7 @@ async def bot_added_to_group(event: ChatMemberUpdated, bot: Bot) -> None:
                         member.user.first_name,
                         db,
                     )
-        except Exception as e:
+        except TelegramAPIError as e:
             logger.warning("Could not fetch admins for GroupAdmin registration", chat_id=chat_id, error=str(e))
 
         await db.commit()
@@ -96,7 +97,7 @@ async def bot_added_to_group(event: ChatMemberUpdated, bot: Bot) -> None:
             f"<i>כל הניהול מתבצע בצ'אט הפרטי עם הבוט.</i>",
             parse_mode="HTML",
         )
-    except Exception as e:
+    except TelegramAPIError as e:
         logger.warning("Could not send bot-added message", chat_id=chat_id, error=str(e))
 
 
@@ -147,7 +148,7 @@ async def cmd_setup(message: Message, bot: Bot) -> None:
         await db.flush()
 
         default_group = await db.scalar(
-            select(Group).where(Group.owner_id == user_id, Group.is_default_template == True)
+            select(Group).where(Group.owner_id == user_id, Group.is_default_template)
         )
         if default_group:
             await clone_group_settings(default_group.id, group.id, db)
@@ -160,7 +161,7 @@ async def cmd_setup(message: Message, bot: Bot) -> None:
             for member in tg_admins:
                 if not member.user.is_bot:
                     await register_group_admin(group.id, member.user.id, member.user.username, member.user.first_name, db)
-        except Exception as e:
+        except TelegramAPIError as e:
             logger.warning("Could not fetch admins for GroupAdmin registration", chat_id=chat_id, error=str(e))
 
         await db.commit()

@@ -1,6 +1,7 @@
 """Initialize database tables and seed global data."""
 import asyncio
 from sqlalchemy import select, text
+from sqlalchemy.exc import OperationalError
 from database.session import engine, AsyncSessionLocal, Base
 from database import models
 
@@ -28,7 +29,7 @@ async def _run_migrations() -> None:
         for sql in new_columns:
             try:
                 await conn.execute(text(sql))
-            except Exception:
+            except OperationalError:
                 pass  # column already exists
 
 

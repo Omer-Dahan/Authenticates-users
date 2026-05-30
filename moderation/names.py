@@ -1,6 +1,6 @@
 """Global Israeli names fuzzy matching (shared across all groups)."""
 import asyncio
-from typing import List, Tuple, Optional
+from typing import List, Tuple
 from rapidfuzz import fuzz, process
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
@@ -16,9 +16,9 @@ _load_lock = asyncio.Lock()
 
 
 async def load_names(db: AsyncSession) -> None:
-    global _names_cache, _cache_loaded
+    global _names_cache, _cache_loaded  # pylint: disable=global-statement
     result = await db.execute(
-        select(IsraeliNameList).where(IsraeliNameList.enabled == True)
+        select(IsraeliNameList).where(IsraeliNameList.enabled)
     )
     names = result.scalars().all()
     _names_cache = [(n.name.lower(), n.score) for n in names]
@@ -41,7 +41,7 @@ async def match_names(
         return []
 
     name_list = [n for n, _ in _names_cache]
-    name_score_map = {n: s for n, s in _names_cache}
+    name_score_map = dict(_names_cache)
     seen_words: set = set()
     matches = []
 

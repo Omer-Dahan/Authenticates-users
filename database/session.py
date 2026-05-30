@@ -8,7 +8,7 @@ os.makedirs("data", exist_ok=True)
 engine = create_async_engine(
     settings.database_url,
     echo=False,
-    connect_args={"check_same_thread": False} if "sqlite" in settings.database_url else {},
+    connect_args={"check_same_thread": False} if "sqlite" in settings.database_url else {},  # pylint: disable=unsupported-membership-test
 )
 
 AsyncSessionLocal = async_sessionmaker(

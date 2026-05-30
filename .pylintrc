@@ -1,0 +1,24 @@
+[MASTER]
+ignore=venv,migrations
+
+[MESSAGES CONTROL]
+# Disable docstring requirements (style preference, not quality issues)
+# Disable line-too-long (handled by formatter)
+# Disable duplicate-code (cross-file refactor is separate effort)
+disable=
+    C0114,  # missing-module-docstring
+    C0115,  # missing-class-docstring
+    C0116,  # missing-function-docstring
+    C0301,  # line-too-long
+    R0801,  # duplicate-code
+    E1102,  # not-callable — false positive for SQLAlchemy func.*
+    R0903,  # too-few-public-methods — false positive for aiogram FSM State classes
+
+[FORMAT]
+max-line-length=120
+
+[DESIGN]
+max-args=8
+max-locals=20
+max-branches=15
+max-statements=60
