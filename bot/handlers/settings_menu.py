@@ -15,7 +15,7 @@ from database.models import (
 from database.clone_utils import get_difference_summary, clone_group_settings
 from bot.keyboards.settings_kb import (
     main_settings_kb, security_mode_kb, back_to_main_kb, languages_list_kb,
-    import_list_kb, import_confirm_kb,
+    import_list_kb, import_confirm_kb, notify_settings_kb,
 )
 from bot.handlers.admin_utils import register_group_admin, mark_settings_edited
 from logs import get_logger
@@ -157,6 +157,58 @@ async def cb_set_mode(callback: CallbackQuery) -> None:
     await callback.answer(f"מצב אבטחה שונה ל: {icons[mode]}", show_alert=True)
     await callback.message.edit_text(
         f"🛡️ <b>מצב אבטחה שונה ל:</b> {icons[mode]}",
+        parse_mode="HTML",
+        reply_markup=back_to_main_kb(group_id),
+    )
+
+
+# ─── Manual-review admin notifications ─────────────────────────────────────────
+
+@router.callback_query(F.data.startswith("sm:notify:"))
+async def cb_notify_menu(callback: CallbackQuery) -> None:
+    group_id = int(callback.data.split(":")[2])
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(
+            select(GroupConfig).where(
+                GroupConfig.group_id == group_id, GroupConfig.key == "notify_admin_on_manual_review"
+            )
+        )
+        cfg = result.scalar_one_or_none()
+        enabled = cfg.value.lower() == "true" if cfg else False
+
+    status = "🔔 פעיל" if enabled else "🔕 כבוי"
+    await callback.message.edit_text(
+        f"🔔 <b>התראות סקירה ידנית</b>\n\n"
+        f"מצב נוכחי: {status}\n\n"
+        f"כאשר מופעל, הבוט ישלח לך הודעה פרטית עם כפתורי אישור/דחייה/חסימה "
+        f"עבור כל בקשת הצטרפות שנופלת בטווח הסקירה הידנית.\n"
+        f"כברירת מחדל ההתראות כבויות — ניתן לעקוב אחרי הבקשות דרך /settings ← סטטיסטיקות.",
+        parse_mode="HTML",
+        reply_markup=notify_settings_kb(group_id, enabled),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("sm:set_notify:"))
+async def cb_set_notify(callback: CallbackQuery) -> None:
+    parts = callback.data.split(":")
+    group_id = int(parts[2])
+    state = parts[3]
+
+    if state not in ("on", "off"):
+        await callback.answer("ערך לא חוקי.")
+        return
+
+    enabled = state == "on"
+    async with AsyncSessionLocal() as db:
+        await _set_config(group_id, "notify_admin_on_manual_review", "true" if enabled else "false", "bool", db)
+        await mark_settings_edited(group_id, callback.from_user.id, callback.from_user.username, callback.from_user.first_name, db)
+        await db.commit()
+
+    status = "🔔 פעיל" if enabled else "🔕 כבוי"
+    await callback.answer(f"התראות סקירה ידנית: {status}", show_alert=True)
+    await callback.message.edit_text(
+        f"🔔 <b>התראות סקירה ידנית שונו ל:</b> {status}",
         parse_mode="HTML",
         reply_markup=back_to_main_kb(group_id),
     )

@@ -23,6 +23,9 @@ def main_settings_kb(group_id: int) -> InlineKeyboardMarkup:
         InlineKeyboardButton(text="📈 סטטיסטיקות", callback_data=f"sm:stats:{g}"),
     )
     builder.row(
+        InlineKeyboardButton(text="🔔 התראות סקירה ידנית", callback_data=f"sm:notify:{g}"),
+    )
+    builder.row(
         InlineKeyboardButton(text="🔄 ייבוא הגדרות", callback_data=f"sm:import:{g}"),
         InlineKeyboardButton(text="💾 קבע כברירת מחדל", callback_data=f"sm:set_default:{g}"),
     )
@@ -226,6 +229,18 @@ def languages_list_kb(group_id: int, filters: list) -> InlineKeyboardMarkup:
             ),
         )
     builder.row(InlineKeyboardButton(text="◀️ חזרה", callback_data=f"sm:main:{group_id}"))
+    return builder.as_markup()
+
+
+def notify_settings_kb(group_id: int, enabled: bool) -> InlineKeyboardMarkup:
+    g = group_id
+    builder = InlineKeyboardBuilder()
+    if enabled:
+        builder.row(InlineKeyboardButton(text="🔕 כבה התראות", callback_data=f"sm:set_notify:{g}:off"))
+    else:
+        builder.row(InlineKeyboardButton(text="🔔 הפעל התראות", callback_data=f"sm:set_notify:{g}:on"))
+    builder.row(InlineKeyboardButton(text="◀️ חזרה להגדרות", callback_data=f"sm:main:{g}"))
+    builder.row(InlineKeyboardButton(text="🏠 רשימת קבוצות", callback_data="start:refresh"))
     return builder.as_markup()
 
 

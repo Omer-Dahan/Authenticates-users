@@ -60,6 +60,7 @@ DEFAULT_GROUP_CONFIG = [
     {"key": "security_mode", "value": "normal", "value_type": "string"},
     {"key": "manual_review_range_min", "value": "30", "value_type": "float"},
     {"key": "manual_review_range_max", "value": "60", "value_type": "float"},
+    {"key": "notify_admin_on_manual_review", "value": "false", "value_type": "bool"},
     {"key": "fuzzy_match_threshold", "value": "80", "value_type": "float"},
     {"key": "welcome_message", "value": "ברוך הבא! אנא השלם את האימות כדי להצטרף.", "value_type": "string"},
     {"key": "approve_message", "value": "בקשתך אושרה! ברוך הבא לקבוצה.", "value_type": "string"},

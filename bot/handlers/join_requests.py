@@ -58,8 +58,14 @@ async def _get_config_value(group_id: int, key: str, default, db) -> any:
         select(GroupConfig).where(GroupConfig.group_id == group_id, GroupConfig.key == key)
     )
     cfg = result.scalar_one_or_none()
-    if not cfg:
+    if not cfg or cfg.value is None:
         return default
+    if cfg.value_type == "bool":
+        return cfg.value.lower() in ("true", "1", "yes")
+    if cfg.value_type == "float":
+        return float(cfg.value)
+    if cfg.value_type == "int":
+        return int(cfg.value)
     return cfg.value
 
 
@@ -129,6 +135,25 @@ async def handle_join_request(
     )
 
     async with AsyncSessionLocal() as db:
+        unresolved = await db.execute(
+            select(JoinRequest).where(
+                JoinRequest.user_id == user.id,
+                JoinRequest.chat_id == chat_id,
+                JoinRequest.decision.in_((DecisionEnum.pending, DecisionEnum.manual_review)),
+            )
+        )
+        if unresolved.scalars().first():
+            # Same user re-requesting while an earlier request is still awaiting
+            # resolution — re-running the flow here would score them again and
+            # send the admin a second manual-review notification for what is,
+            # from the admin's point of view, the same open request.
+            logger.info(
+                "Join request ignored — an unresolved request already exists",
+                user_id=user.id,
+                chat_id=chat_id,
+            )
+            return
+
         await _ensure_user(user, db)
 
         user_data = {
@@ -218,7 +243,11 @@ async def handle_join_request(
                 matched_rules=scoring_result.matched_rule_ids,
             ))
             await db.commit()
-            await _notify_manual_review(bot, user, group, join_req, scoring_result)
+            notify_admin = await _get_config_value(
+                group.id, "notify_admin_on_manual_review", False, db
+            )
+            if notify_admin:
+                await _notify_manual_review(bot, user, group, join_req, scoring_result)
             await send_decision(
                 bot, DecisionEnum.manual_review, user.id, user_name, user.username,
                 scoring_result.total_score, matched_rules_dicts,
