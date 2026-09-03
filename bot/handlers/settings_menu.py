@@ -174,7 +174,7 @@ async def cb_notify_menu(callback: CallbackQuery) -> None:
             )
         )
         cfg = result.scalar_one_or_none()
-        enabled = cfg.value.lower() == "true" if cfg else False
+        enabled = (cfg.value.lower() in ("true", "1", "yes")) if (cfg and cfg.value) else False
 
     status = "🔔 פעיל" if enabled else "🔕 כבוי"
     await callback.message.edit_text(

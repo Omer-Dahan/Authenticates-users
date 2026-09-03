@@ -63,9 +63,15 @@ async def _get_config_value(group_id: int, key: str, default, db) -> any:
     if cfg.value_type == "bool":
         return cfg.value.lower() in ("true", "1", "yes")
     if cfg.value_type == "float":
-        return float(cfg.value)
+        try:
+            return float(cfg.value)
+        except ValueError:
+            return default
     if cfg.value_type == "int":
-        return int(cfg.value)
+        try:
+            return int(cfg.value)
+        except ValueError:
+            return default
     return cfg.value
 
 
