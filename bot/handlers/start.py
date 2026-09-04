@@ -1,4 +1,4 @@
-﻿"""Private-chat /start command — bot info + group management dashboard."""
+"""Private-chat /start command — bot info + group management dashboard."""
 from aiogram import Router, Bot, F
 from aiogram.exceptions import TelegramAPIError
 from aiogram.filters import CommandStart
@@ -40,6 +40,12 @@ def _groups_kb(groups: list[Group], bot_username: str, owned_ids: set[int]) -> I
         InlineKeyboardButton(
             text="📖 מדריך למשתמש ושאלות נפוצות",
             url="https://telegra.ph/מדריך-למשתמש-ושאלות-נפוצות---בוט-סינון-הצטרפות-05-30-2",
+        )
+    )
+    builder.row(
+        InlineKeyboardButton(
+            text="📣 הערוץ שלנו",
+            url="https://t.me/YD_IL_BOTS",
         )
     )
     builder.row(

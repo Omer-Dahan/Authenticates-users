@@ -1,5 +1,16 @@
 import pytest
+from bot.handlers.start import _groups_kb
 from bot.keyboards.settings_kb import main_settings_kb, notify_settings_kb
+
+
+def test_groups_kb_has_channel_button():
+    kb = _groups_kb(groups=[], bot_username="test_bot", owned_ids=set())
+    buttons = [btn for row in kb.inline_keyboard for btn in row]
+
+    channel_btns = [b for b in buttons if b.url == "https://t.me/YD_IL_BOTS"]
+    assert len(channel_btns) == 1
+    assert channel_btns[0].text == "📣 הערוץ שלנו"
+
 
 
 def test_main_settings_kb_has_notify_button():

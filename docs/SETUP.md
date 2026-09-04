@@ -94,6 +94,7 @@ Since the system is 100% Telegram-Native, you can configure everything directly 
 
 | Command | Description |
 |---------|-------------|
+| `/start` | Open dashboard & group list with links to setup, FAQ, and updates channel (`📣 הערוץ שלנו`) |
 | `/settings` | Open interactive settings dashboard (Private DM only) |
 | `/admin` | Open Super-Admin control panel (Private DM only) |
 | `/stats` | Show approval/rejection statistics |
