@@ -32,7 +32,7 @@ async def _show_rules(query_or_msg, group_id: int, edit: bool = True) -> None:
     kb = rules_list_kb(group_id, rules)
     text = (
         f"📋 <b>כללים ({len(rules)})</b>\n"
-        f"כללים לסינון משתמשים לפי תבניות טקסט (Regex, מילות מפתח או התאמה מלאה) בשמותיהם ובכינוייהם.\n\n"
+        f"כללים לסינון לפי תבניות טקסט (Regex, מילות מפתח או התאמה מלאה) בשם או בכינוי.\n\n"
         f"בחר כלל לשינוי סטטוס / מחיקה, או הוסף כלל חדש:"
     )
 

@@ -1,4 +1,4 @@
-"""Private-chat /start command — bot info + group management dashboard."""
+"""Private-chat /start command: bot info + group management dashboard."""
 from aiogram import Router, Bot, F
 from aiogram.exceptions import TelegramAPIError
 from aiogram.filters import CommandStart
@@ -98,7 +98,7 @@ async def _send_dashboard(message: Message, bot: Bot, edit: bool = False) -> Non
 
     text = (
         "🛡️ <b>בוט מודרציה לבקשות הצטרפות</b>\n\n"
-        "הבוט שולט על מי מצטרף לקבוצות שלך — "
+        "הבוט מנהל את ההצטרפות לקבוצות שלך: "
         "הוא בודק כל בקשת הצטרפות לפי כללים שתגדיר "
         "(שמות, שפות, ביטויים חשודים) ומאשר, דוחה, או מעביר לסקירה ידנית.\n\n"
         "✅ אישור / דחייה אוטומטיים לפי ניקוד\n"

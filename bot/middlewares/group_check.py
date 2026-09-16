@@ -30,15 +30,15 @@ class GroupCheckMiddleware(BaseMiddleware):
             group = result.scalar_one_or_none()
 
         if group is None:
-            logger.debug("Join request ignored — group not registered", chat_id=chat_id)
+            logger.debug("Join request ignored: group not registered", chat_id=chat_id)
             return
 
         if group.is_banned:
-            logger.debug("Join request ignored — group is banned", chat_id=chat_id)
+            logger.debug("Join request ignored: group is banned", chat_id=chat_id)
             return
 
         if not group.is_active:
-            logger.debug("Join request ignored — group is inactive", chat_id=chat_id)
+            logger.debug("Join request ignored: group is inactive", chat_id=chat_id)
             return
 
         data["group_db"] = group

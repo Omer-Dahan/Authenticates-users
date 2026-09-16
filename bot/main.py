@@ -1,4 +1,4 @@
-﻿"""Bot entry point — multi-tenant setup."""
+"""Bot entry point: multi-tenant setup."""
 import asyncio
 import sys
 import os
@@ -44,7 +44,7 @@ async def main() -> None:
 
     dp = Dispatcher(storage=MemoryStorage())
 
-    # join_request-scoped middleware only — rate limiting must NOT apply to admin callbacks
+    # join_request-scoped middleware only: rate limiting must NOT apply to admin callbacks
     dp.chat_join_request.outer_middleware(RateLimitMiddleware(
         max_requests=settings.rate_limit_requests,
         window_seconds=settings.rate_limit_window,
@@ -55,7 +55,7 @@ async def main() -> None:
     ))
     dp.chat_join_request.outer_middleware(GroupCheckMiddleware())
 
-    # Routers — order matters: more specific handlers first
+    # Routers: order matters: more specific handlers first
     dp.include_router(start.router)
     dp.include_router(setup.router)
     dp.include_router(superadmin.router)
@@ -70,7 +70,7 @@ async def main() -> None:
     try:
         await bot.delete_webhook(drop_pending_updates=True)
     except TelegramAPIError as e:
-        logger.error("Failed to delete webhook — network issue?", error=str(e))
+        logger.error("Failed to delete webhook: network issue?", error=str(e))
         return
     # Start background cleanup task for expired verification sessions
     asyncio.create_task(start_cleanup_loop(bot, interval_seconds=60))

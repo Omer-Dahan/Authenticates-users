@@ -1,4 +1,4 @@
-﻿"""Handles chat_join_request events — multi-tenant moderation flow."""
+"""Handles chat_join_request events - multi-tenant moderation flow."""
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -91,7 +91,7 @@ async def _notify_manual_review(
 ) -> None:
     name = f"{user.first_name or ''} {user.last_name or ''}".strip()
     username_str = f"@{user.username}" if user.username else "no username"
-    rules_str = ", ".join(scoring_result.matched_rule_ids) or "—"
+    rules_str = ", ".join(scoring_result.matched_rule_ids) or "-"
 
     text = (
         f"⚠️ <b>סקירה ידנית נדרשת</b>\n\n"
@@ -123,7 +123,7 @@ async def handle_join_request(
 
     if raid_active:
         logger.warning(
-            "Join request received during active raid — applying strict scoring",
+            "Join request received during active raid - applying strict scoring",
             user_id=request.from_user.id,
             chat_id=request.chat.id,
         )
@@ -150,11 +150,11 @@ async def handle_join_request(
         )
         if unresolved.scalars().first():
             # Same user re-requesting while an earlier request is still awaiting
-            # resolution — re-running the flow here would score them again and
+            # resolution - re-running the flow here would score them again and
             # send the admin a second manual-review notification for what is,
             # from the admin's point of view, the same open request.
             logger.info(
-                "Join request ignored — an unresolved request already exists",
+                "Join request ignored - an unresolved request already exists",
                 user_id=user.id,
                 chat_id=chat_id,
             )
@@ -275,7 +275,7 @@ async def handle_join_request(
                 except TelegramAPIError as e:
                     logger.error("Could not send verification question", user_id=user.id, error=str(e))
             else:
-                # No questions configured — decide by score
+                # No questions configured - decide by score
                 if scoring_result.total_score >= 0:
                     try:
                         await bot.approve_chat_join_request(chat_id, user.id)

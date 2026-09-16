@@ -1,4 +1,4 @@
-# Telegram Join Request Moderation System — Setup Guide
+# Telegram Join Request Moderation System - Setup Guide
 
 ## Quick Start (Local)
 
@@ -139,7 +139,7 @@ Since the system is 100% Telegram-Native, you can configure everything directly 
 
 ## Important Notes
 
-- This system uses **only the official Telegram Bot API** — no userbots, MTProto, or Telethon.
-- The bot **cannot** read user bio/about — only name, username, and verification answers.
+- This system uses **only the official Telegram Bot API**: no userbots, MTProto, or Telethon.
+- The bot **cannot** read user bio/about: only name, username, and verification answers.
 - The bot **must be an admin** in the target group with `can_invite_users` (approve members) and `can_restrict_members`.
 - SQLite is used by default; for production scale, change `DATABASE_URL` to PostgreSQL.

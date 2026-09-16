@@ -9,7 +9,7 @@ from logs import get_logger
 
 logger = get_logger(__name__)
 
-# Module-level cache — Israeli names are global and rarely change.
+# Module-level cache: Israeli names are global and rarely change.
 _names_cache: List[Tuple[str, float]] = []
 _cache_loaded = False
 _load_lock = asyncio.Lock()

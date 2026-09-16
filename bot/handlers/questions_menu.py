@@ -1,4 +1,4 @@
-﻿"""FSM-based verification question management through the bot."""
+"""FSM-based verification question management through the bot."""
 from aiogram import Router, F
 from aiogram.types import CallbackQuery, Message
 from aiogram.fsm.context import FSMContext
@@ -38,7 +38,7 @@ async def _show_questions(callback: CallbackQuery, group_id: int) -> None:
     kb = questions_list_kb(group_id, questions)
     await callback.message.edit_text(
         f"❓ <b>שאלות אימות ({len(questions)})</b>\n"
-        f"שאלות המוצגות למצטרפים החדשים. מענה נכון מעניק ניקוד חיובי, ומענה שגוי או התעלמות מורידים ניקוד.\n\n"
+        f"שאלות למצטרפים חדשים. מענה נכון מעניק ניקוד, ומענה שגוי או התעלמות מורידים ניקוד.\n\n"
         f"שאלות נבחרות אקראית לכל בקשת הצטרפות:",
         parse_mode="HTML",
         reply_markup=kb,
@@ -195,7 +195,7 @@ async def _show_editor_menu(message_or_callback, state: FSMContext) -> None:
         f"🚫 <b>חסימה בכישלון:</b> {ban_text}\n"
         f"🟢 <b>ניקוד (הצלחה):</b> {score_pass:+.0f}\n"
         f"🔴 <b>ניקוד (כישלון):</b> {score_fail:+.0f}\n\n"
-        f"לחץ על הכפתורים מטה כדי לערוך שדות ספציפיים, ולבסוף לחץ על <b>שמור</b>."
+        f"לחץ על הכפתורים מטה לעריכת שדות, ולסיום לחץ על <b>שמור</b>."
     )
 
     kb = question_editor_kb(data)

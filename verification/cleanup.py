@@ -101,7 +101,7 @@ async def cleanup_expired_sessions(bot: Bot) -> None:
                 try:
                     await bot.send_message(
                         user_id,
-                        "⏰ תוקף האימות פג. שלח בקשת הצטרפות חדשה לקבוצה אם ברצונך להתאמת שוב."
+                        "⏰ תוקף האימות פג. שלח בקשת הצטרפות חדשה."
                     )
                 except Exception as e:
                     logger.debug("Failed to send timeout warning message to user", user_id=user_id, error=str(e))

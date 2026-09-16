@@ -1,4 +1,4 @@
-﻿"""Super-admin panel — only accessible by SUPER_ADMIN_ID."""
+"""Super-admin panel: only accessible by SUPER_ADMIN_ID."""
 from aiogram import Router, F, Bot
 from aiogram.exceptions import TelegramAPIError
 from aiogram.filters import Command
@@ -64,7 +64,7 @@ async def cmd_admin(message: Message) -> None:
             select(func.count(JoinRequest.id)).where(JoinRequest.decision == DecisionEnum.approved)
         )
 
-    rate = f"{approved / total_requests * 100:.1f}%" if total_requests else "—"
+    rate = f"{approved / total_requests * 100:.1f}%" if total_requests else "-"
 
     builder = InlineKeyboardBuilder()
     builder.row(
@@ -102,7 +102,7 @@ async def cb_admin_main(callback: CallbackQuery) -> None:
             select(func.count(JoinRequest.id)).where(JoinRequest.decision == DecisionEnum.approved)
         )
 
-    rate = f"{approved / total_requests * 100:.1f}%" if total_requests else "—"
+        rate = f"{approved / total_requests * 100:.1f}%" if total_requests else "-"
 
     builder = InlineKeyboardBuilder()
     builder.row(
@@ -169,7 +169,7 @@ async def cb_group_info(callback: CallbackQuery) -> None:
             )
         )
 
-    rate = f"{approved / total * 100:.1f}%" if total else "—"
+    rate = f"{approved / total * 100:.1f}%" if total else "-"
     status = "🟢 פעילה" if group.is_active and not group.is_banned else ("🔴 חסומה" if group.is_banned else "⏸ מושהית")
 
     await callback.message.edit_text(
@@ -178,7 +178,7 @@ async def cb_group_info(callback: CallbackQuery) -> None:
         f"👤 מנהל: <code>{group.owner_id}</code>\n"
         f"📊 בקשות: {total} | ✅ {rate}\n"
         f"סטטוס: {status}\n"
-        f"📅 נרשמה: {group.created_at.strftime('%d/%m/%Y') if group.created_at else '—'}",
+        f"📅 נרשמה: {group.created_at.strftime('%d/%m/%Y') if group.created_at else '-'}",
         parse_mode="HTML",
         reply_markup=_group_actions_kb(group_id, group.is_active, group.is_banned),
     )
@@ -267,7 +267,7 @@ async def cb_recent_log(callback: CallbackQuery) -> None:
 
     lines = ["📜 <b>50 רשומות אחרונות</b>\n"]
     for log in logs:
-        name = f"{log.first_name or ''} {log.last_name or ''}".strip() or "—"
+        name = f"{log.first_name or ''} {log.last_name or ''}".strip() or "-"
         icon = {"approved": "✅", "rejected": "❌", "banned": "🔨", "manual_review": "👀", "pending": "⏳"}.get(
             log.decision.value, "?"
         )
@@ -332,13 +332,13 @@ async def cmd_search_user(message: Message) -> None:
         icon = {"approved": "✅", "rejected": "❌", "banned": "🔨", "manual_review": "👀", "pending": "⏳"}.get(
             log.decision.value, "?"
         )
-        ts = log.created_at.strftime("%d/%m %H:%M") if log.created_at else "—"
+        ts = log.created_at.strftime("%d/%m %H:%M") if log.created_at else "-"
         lines.append(f"{icon} gid:{log.group_id or '?'} | {log.score:+.0f} | {ts}")
 
     await message.reply("\n".join(lines), parse_mode="HTML")
 
 
-# ─── Broadcast (stub — sends to each group owner) ─────────────────────────────
+# ─── Broadcast (stub: sends to each group owner) ─────────────────────────────
 
 @router.callback_query(F.data == "sa:broadcast")
 async def cb_broadcast_prompt(callback: CallbackQuery) -> None:

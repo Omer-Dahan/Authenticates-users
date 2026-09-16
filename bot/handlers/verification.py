@@ -1,4 +1,4 @@
-﻿"""Handles verification answer messages in private chat — multi-tenant."""
+"""Handles verification answer messages in private chat: multi-tenant."""
 from datetime import datetime, timezone
 
 from aiogram import Router, Bot, F
@@ -38,7 +38,7 @@ async def _get_config_msg(group_id: int, key: str, db) -> str | None:
 
 @router.message(F.chat.type == "private")
 async def handle_verification_answer(message: Message, bot: Bot) -> None:
-    # Skip commands — they're handled by other handlers
+    # Skip commands: they're handled by other handlers
     if message.text and message.text.startswith("/"):
         return
 
@@ -82,7 +82,7 @@ async def handle_verification_answer(message: Message, bot: Bot) -> None:
             await db.commit()
             return
 
-        # Verification concluded — re-evaluate with score
+        # Verification concluded: re-evaluate with score
         user_result = await db.get(TelegramUser, user_id)
         user_data = {
             "user_id": user_id,

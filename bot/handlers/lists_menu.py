@@ -37,7 +37,7 @@ async def _show_blacklist(callback: CallbackQuery, group_id: int) -> None:
         entries = result.scalars().all()
     await callback.message.edit_text(
         f"🚫 <b>רשימה שחורה ({len(entries)} מילים)</b>\n"
-        f"מילים ספציפיות המורידות ניקוד אם הן מופיעות בשמו או בפרטיו של המצטרף החדש.\n\n"
+        f"מילים שמורידות ניקוד אם הן מופיעות בפרטי המצטרף.\n\n"
         f"בחר מילה למחיקה או הוסף מילה חדשה:",
         parse_mode="HTML",
         reply_markup=blacklist_list_kb(group_id, entries),
@@ -142,7 +142,7 @@ async def _show_whitelist(callback: CallbackQuery, group_id: int) -> None:
         entries = result.scalars().all()
     await callback.message.edit_text(
         f"✅ <b>רשימה לבנה ({len(entries)} משתמשים)</b>\n"
-        f"משתמשים לפי Telegram ID שיאושרו באופן מיידי ואוטומטי ללא צורך במעבר סינון.\n\n"
+        f"משתמשי Telegram ID שיאושרו אוטומטית ללא סינון.\n\n"
         f"בחר משתמש למחיקה או הוסף משתמש חדש:",
         parse_mode="HTML",
         reply_markup=whitelist_list_kb(group_id, entries),
@@ -196,7 +196,7 @@ async def fsm_wl_enter_user_id(message: Message, state: FSMContext) -> None:
         return
     await state.update_data(telegram_id=telegram_id)
     await state.set_state(AddWhitelistState.entering_notes)
-    await message.answer("הזן הערה (אופציונלי — שלח - לדלג):")
+    await message.answer("הזן הערה (אופציונלי, שלח - כדי לדלג):")
 
 
 @router.message(AddWhitelistState.entering_notes, F.chat.type == "private")

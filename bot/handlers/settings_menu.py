@@ -1,4 +1,4 @@
-﻿"""Main settings menu, security mode, thresholds, stats, and manual review callbacks."""
+"""Main settings menu, security mode, thresholds, stats, and manual review callbacks."""
 from datetime import datetime, timezone
 
 from aiogram import Router, Bot, F
@@ -182,7 +182,7 @@ async def cb_notify_menu(callback: CallbackQuery) -> None:
         f"מצב נוכחי: {status}\n\n"
         f"כאשר מופעל, הבוט ישלח לך הודעה פרטית עם כפתורי אישור/דחייה/חסימה "
         f"עבור כל בקשת הצטרפות שנופלת בטווח הסקירה הידנית.\n"
-        f"כברירת מחדל ההתראות כבויות — ניתן לעקוב אחרי הבקשות דרך /settings ← סטטיסטיקות.",
+        f"כברירת מחדל ההתראות כבויות. ניתן לעקוב אחרי הבקשות דרך /settings ← סטטיסטיקות.",
         parse_mode="HTML",
         reply_markup=notify_settings_kb(group_id, enabled),
     )
@@ -235,11 +235,11 @@ async def cb_stats(callback: CallbackQuery) -> None:
 
         total = sum(counts.values())
         approved = counts[DecisionEnum.approved]
-        rate = f"{approved / total * 100:.1f}%" if total else "—"
+        rate = f"{approved / total * 100:.1f}%" if total else "-"
 
     text = (
         f"📊 <b>סטטיסטיקות: {group.title if group else group_id}</b>\n"
-        f"ריכוז נתוני ההצטרפות לקבוצה ופעולות המודרציה שבוצעו:\n\n"
+        f"נתוני הצטרפות ומודרציה:\n\n"
         f"✅ אושרו: {counts[DecisionEnum.approved]}\n"
         f"❌ נדחו: {counts[DecisionEnum.rejected]}\n"
         f"🔨 חסומים: {counts[DecisionEnum.banned]}\n"

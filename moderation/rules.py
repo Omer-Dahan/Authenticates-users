@@ -18,7 +18,7 @@ def _safe_regex_search(pattern: str, text: str, flags: int, timeout: float = 0.5
     try:
         return bool(future.result(timeout=timeout))
     except concurrent.futures.TimeoutError:
-        logger.warning("Regex timeout — rule skipped", pattern=pattern[:80])
+        logger.warning("Regex timeout: rule skipped", pattern=pattern[:80])
         return False
 
 

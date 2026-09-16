@@ -1,4 +1,4 @@
-"""Main moderation engine — multi-tenant, queries DB per group per request."""
+"""Main moderation engine: multi-tenant, queries DB per group per request."""
 from typing import Dict, Any, Optional
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
@@ -46,7 +46,7 @@ async def _is_whitelisted(user_id: int, group_id: int, db: AsyncSession) -> bool
 
 
 class ModerationEngine:
-    """Stateless engine — each evaluate() call queries the DB for group-specific config."""
+    """Stateless engine: each evaluate() call queries the DB for group-specific config."""
 
     async def evaluate(
         self,
@@ -59,7 +59,7 @@ class ModerationEngine:
         user_id = user_data.get("user_id", 0)
 
         if await _is_whitelisted(user_id, group_id, db):
-            logger.info("User whitelisted — auto-approving", user_id=user_id, group_id=group_id)
+            logger.info("User whitelisted: auto-approving", user_id=user_id, group_id=group_id)
             return ScoringResult(
                 user_id=user_id,
                 total_score=200.0,
@@ -177,7 +177,7 @@ class ModerationEngine:
         elif requires_verification and verification_score is None:
             decision = DecisionEnum.pending
         else:
-            # score in [reject_threshold, manual_min) — not high enough for manual review
+            # score in [reject_threshold, manual_min): not high enough for manual review
             decision = DecisionEnum.rejected
 
         return ScoringResult(

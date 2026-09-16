@@ -21,7 +21,7 @@ _DECISION_ICON = {
 
 def _format_rules(matched_rules: List[dict]) -> str:
     if not matched_rules:
-        return "—"
+        return "-"
     parts = []
     for r in matched_rules:
         score = r.get("score", 0)
@@ -50,7 +50,7 @@ async def send_decision(
     if group_username:
         group_str += f" (@{group_username})"
 
-    username_str = f"@{username}" if username else "—"
+    username_str = f"@{username}" if username else "-"
     now = datetime.now(timezone.utc).strftime("%d/%m/%Y %H:%M:%S")
 
     if decision in (DecisionEnum.banned, DecisionEnum.rejected) and reason:

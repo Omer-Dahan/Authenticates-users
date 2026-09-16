@@ -11,8 +11,8 @@ disable=
     C0116,  # missing-function-docstring
     C0301,  # line-too-long
     R0801,  # duplicate-code
-    E1102,  # not-callable — false positive for SQLAlchemy func.*
-    R0903,  # too-few-public-methods — false positive for aiogram FSM State classes
+    E1102,  # not-callable: false positive for SQLAlchemy func.*
+    R0903,  # too-few-public-methods: false positive for aiogram FSM State classes
 
 [FORMAT]
 max-line-length=120
