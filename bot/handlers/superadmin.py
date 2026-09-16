@@ -102,7 +102,7 @@ async def cb_admin_main(callback: CallbackQuery) -> None:
             select(func.count(JoinRequest.id)).where(JoinRequest.decision == DecisionEnum.approved)
         )
 
-        rate = f"{approved / total_requests * 100:.1f}%" if total_requests else "-"
+    rate = f"{approved / total_requests * 100:.1f}%" if total_requests else "-"
 
     builder = InlineKeyboardBuilder()
     builder.row(
