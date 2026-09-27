@@ -9,6 +9,7 @@ from sqlalchemy import select
 from database.session import AsyncSessionLocal
 from database.models import (
     JoinRequest, DecisionEnum, TelegramUser, GroupConfig, ModerationLog, Group,
+    VerificationSession,
 )
 from moderation import ModerationEngine
 from verification import VerificationEngine
@@ -63,6 +64,20 @@ async def handle_verification_answer(message: Message, bot: Bot) -> None:
         session = await _VERIFICATION_ENGINE.get_active_session(user_id, chat_id, db)
 
         if not session:
+            # A backlog replay of an old answer can arrive after the session
+            # was already resolved elsewhere (e.g. outage recovery approved the
+            # user via get_chat_member). Treat that as a silent no-op instead of
+            # declining someone who is actually already in.
+            latest_result = await db.execute(
+                select(VerificationSession).where(
+                    VerificationSession.user_id == user_id,
+                    VerificationSession.chat_id == chat_id,
+                ).order_by(VerificationSession.id.desc())
+            )
+            latest_session = latest_result.scalars().first()
+            if latest_session and latest_session.completed_at is not None and latest_session.passed:
+                return
+
             await message.reply("⏰ תוקף האימות פג. שלח בקשת הצטרפות חדשה.")
             try:
                 await bot.decline_chat_join_request(chat_id, user_id)

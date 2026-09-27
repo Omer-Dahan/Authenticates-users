@@ -17,6 +17,15 @@ DEFAULT_ISRAELI_NAMES = [
 ]
 
 
+async def _add_column(conn, sql: str) -> bool:
+    """Attempts to add a column; returns True only if it was newly created."""
+    try:
+        await conn.execute(text(sql))
+        return True
+    except OperationalError:
+        return False  # column already exists
+
+
 async def _run_migrations() -> None:
     """Add new columns to existing tables (SQLite ALTER TABLE is idempotent here)."""
     new_columns = [
@@ -27,10 +36,19 @@ async def _run_migrations() -> None:
     ]
     async with engine.begin() as conn:
         for sql in new_columns:
-            try:
-                await conn.execute(text(sql))
-            except OperationalError:
-                pass  # column already exists
+            await _add_column(conn, sql)
+
+        # notified_at is the source of truth for "the verification question was
+        # never delivered". Backfill existing rows only the moment the column is
+        # created: re-running it on every startup would wrongly mark a session
+        # whose notification DM crashed mid-send as already notified.
+        notified_at_added = await _add_column(
+            conn, "ALTER TABLE verification_sessions ADD COLUMN notified_at DATETIME"
+        )
+        if notified_at_added:
+            await conn.execute(text(
+                "UPDATE verification_sessions SET notified_at = created_at WHERE notified_at IS NULL"
+            ))
 
 
 async def init_db() -> None:

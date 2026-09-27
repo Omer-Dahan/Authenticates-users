@@ -28,6 +28,11 @@ class Settings(BaseSettings):
     raid_threshold: int = Field(default=10, env="RAID_THRESHOLD")
     raid_window: int = Field(default=30, env="RAID_WINDOW")
 
+    # Outage / downtime recovery
+    outage_threshold_seconds: int = Field(default=180, env="OUTAGE_THRESHOLD_SECONDS")
+    heartbeat_interval_seconds: int = Field(default=60, env="HEARTBEAT_INTERVAL_SECONDS")
+    recovery_grace_seconds: int = Field(default=30, env="RECOVERY_GRACE_SECONDS")
+
     model_config = {
         "env_file": ".env",
         "env_file_encoding": "utf-8",

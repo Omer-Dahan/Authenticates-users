@@ -214,6 +214,10 @@ class VerificationSession(Base):
     expires_at = Column(DateTime(timezone=True), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     completed_at = Column(DateTime(timezone=True), nullable=True)
+    # Set only once the verification question DM was actually delivered - the
+    # source of truth outage recovery uses to tell "never got a message" apart
+    # from "got it, then the bot went down before they answered".
+    notified_at = Column(DateTime(timezone=True), nullable=True)
 
     user = relationship("TelegramUser", back_populates="verification_sessions")
     question = relationship("GroupQuestion", back_populates="sessions")
@@ -269,6 +273,50 @@ class RateLimitEntry(Base):
     action = Column(String(100), nullable=False)
     count = Column(Integer, default=1)
     window_start = Column(DateTime(timezone=True), server_default=func.now())
+
+
+class BotState(Base):
+    """Single-row (id=1) table tracking bot liveness for outage detection."""
+    __tablename__ = "bot_state"
+
+    id = Column(Integer, primary_key=True, default=1)
+    last_heartbeat_at = Column(DateTime(timezone=True), nullable=True)
+    last_started_at = Column(DateTime(timezone=True), nullable=True)
+    outage_started_at = Column(DateTime(timezone=True), nullable=True)
+    outage_seconds = Column(Float, nullable=True)
+    recovery_completed_at = Column(DateTime(timezone=True), nullable=True)
+
+
+class OutageLog(Base):
+    """One row per detected outage, updated as its recovery sweep progresses."""
+    __tablename__ = "outage_logs"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    started_at = Column(DateTime(timezone=True), nullable=False)
+    ended_at = Column(DateTime(timezone=True), nullable=True)
+    duration_seconds = Column(Float, nullable=False, default=0.0)
+    groups_scanned = Column(Integer, default=0)
+    requests_recovered = Column(Integer, default=0)
+    sessions_extended = Column(Integer, default=0)
+    members_messaged = Column(Integer, default=0)
+    skipped = Column(Integer, default=0)
+    details = Column(JSON, default=dict)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
+class MemberEvent(Base):
+    """Records chat_member add/remove events, mainly to catch up on ones during an outage."""
+    __tablename__ = "member_events"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    group_id = Column(Integer, ForeignKey("groups.id"), nullable=True, index=True)
+    chat_id = Column(BigInteger, nullable=False)
+    user_id = Column(BigInteger, nullable=False)
+    old_status = Column(String(50), nullable=True)
+    new_status = Column(String(50), nullable=True)
+    event_at = Column(DateTime(timezone=True), nullable=False)
+    during_outage = Column(Boolean, default=False, nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
 
 
 class GroupAdmin(Base):

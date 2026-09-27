@@ -15,10 +15,12 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from config import settings
 from logs import get_logger, setup_logging
 from database.init_db import init_db
+from database.session import AsyncSessionLocal
 from moderation import ModerationEngine
 from verification import VerificationEngine, start_cleanup_loop
+from recovery import detect_outage, start_heartbeat_loop, run_recovery_sweep
 
-from bot.handlers import join_requests, verification, setup, settings_menu
+from bot.handlers import join_requests, verification, setup, settings_menu, member_events
 from bot.handlers import rules_menu, questions_menu, lists_menu, superadmin, start
 from bot.middlewares.rate_limiter import RateLimitMiddleware, RaidProtectionMiddleware
 from bot.middlewares.group_check import GroupCheckMiddleware
@@ -36,6 +38,7 @@ async def main() -> None:
 
     join_requests.setup_engines(mod_engine, ver_engine)
     verification.setup_engines(mod_engine, ver_engine)
+    member_events.setup_engine(ver_engine)
 
     bot = Bot(
         token=settings.bot_token,
@@ -65,15 +68,33 @@ async def main() -> None:
     dp.include_router(lists_menu.router)
     dp.include_router(join_requests.router)
     dp.include_router(verification.router)
+    dp.include_router(member_events.router)
 
     logger.info("Bot starting...", mode="polling")
     try:
-        await bot.delete_webhook(drop_pending_updates=True)
+        # Keep the pending-update backlog (join requests, verification answers,
+        # member changes) instead of discarding it: outage recovery replays and
+        # reconciles it below rather than losing up to 24h of Telegram history.
+        await bot.delete_webhook(drop_pending_updates=False)
     except TelegramAPIError as e:
         logger.error("Failed to delete webhook: network issue?", error=str(e))
         return
-    # Start background cleanup task for expired verification sessions
-    asyncio.create_task(start_cleanup_loop(bot, interval_seconds=60))
+
+    async with AsyncSessionLocal() as db:
+        outage_started_at, outage_seconds = await detect_outage(db)
+
+    recovery_done_event = asyncio.Event()
+    asyncio.create_task(start_heartbeat_loop(settings.heartbeat_interval_seconds))
+    asyncio.create_task(run_recovery_sweep(
+        bot, ver_engine, outage_started_at, outage_seconds,
+        settings.recovery_grace_seconds, recovery_done_event,
+    ))
+
+    # Start background cleanup task for expired verification sessions - gated
+    # so it waits for the recovery sweep before its first run
+    asyncio.create_task(start_cleanup_loop(
+        bot, interval_seconds=60, recovery_done_event=recovery_done_event,
+    ))
 
     await dp.start_polling(
         bot,
@@ -82,6 +103,7 @@ async def main() -> None:
             "callback_query",
             "chat_join_request",
             "my_chat_member",
+            "chat_member",
         ],
     )
 

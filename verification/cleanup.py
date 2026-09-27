@@ -5,12 +5,26 @@ from aiogram import Bot
 from sqlalchemy import select
 from database.session import AsyncSessionLocal
 from database.models import (
-    VerificationSession, JoinRequest, DecisionEnum, ModerationLog, Group, TelegramUser
+    VerificationSession, JoinRequest, DecisionEnum, ModerationLog, Group, TelegramUser,
+    OutageLog,
 )
 from tracking.channel import send_decision
 from logs import get_logger
 
 logger = get_logger(__name__)
+
+
+async def _is_in_unreconciled_outage(expires_at, db) -> bool:
+    """True if expires_at falls inside an outage window whose recovery sweep
+    hasn't finished yet - declining it now could reject a user the sweep is
+    about to approve, or extend past its (still growing) actual duration."""
+    if expires_at is None:
+        return False
+    result = await db.execute(select(OutageLog).where(OutageLog.ended_at.is_(None)))
+    for outage in result.scalars().all():
+        if expires_at >= outage.started_at:
+            return True
+    return False
 
 
 async def cleanup_expired_sessions(bot: Bot) -> None:
@@ -37,6 +51,13 @@ async def cleanup_expired_sessions(bot: Bot) -> None:
         logger.info("Found expired verification sessions to clean up", count=len(expired_sessions))
 
         for session in expired_sessions:
+            if await _is_in_unreconciled_outage(session.expires_at, db):
+                logger.info(
+                    "Skipping expired session inside an unreconciled outage window",
+                    user_id=session.user_id, chat_id=session.chat_id,
+                )
+                continue
+
             user_id = session.user_id
             chat_id = session.chat_id
 
@@ -129,9 +150,25 @@ async def cleanup_expired_sessions(bot: Bot) -> None:
         await db.commit()
 
 
-async def start_cleanup_loop(bot: Bot, interval_seconds: int = 60) -> None:
-    """Runs a background loop that periodically cleans up expired verification sessions."""
+async def start_cleanup_loop(
+    bot: Bot,
+    interval_seconds: int = 60,
+    recovery_done_event: "asyncio.Event | None" = None,
+    safety_timeout_seconds: int = 120,
+) -> None:
+    """Runs a background loop that periodically cleans up expired verification sessions.
+
+    If recovery_done_event is given, the first run waits for the outage
+    recovery sweep to finish reconciling leftovers first, so it can't decline a
+    session the sweep is about to resolve or extend. Bounded by
+    safety_timeout_seconds so a stuck sweep can never block cleanup forever.
+    """
     logger.info("Starting background verification cleanup loop...")
+    if recovery_done_event is not None:
+        try:
+            await asyncio.wait_for(recovery_done_event.wait(), timeout=safety_timeout_seconds)
+        except asyncio.TimeoutError:
+            logger.warning("Recovery sweep did not finish before safety timeout; starting cleanup anyway")
     while True:
         try:
             await cleanup_expired_sessions(bot)
