@@ -1,9 +1,9 @@
 """Main moderation engine: multi-tenant, queries DB per group per request."""
 from typing import Dict, Any, Optional
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import select, or_
 
-from database.models import DecisionEnum, GroupConfig, GroupWhitelist, SecurityModeEnum
+from database.models import DecisionEnum, GroupConfig, GroupWhitelist, SecurityModeEnum, UserBan
 from moderation import rules as rule_engine
 from moderation import languages as lang_engine
 from moderation import names as name_engine
@@ -45,6 +45,17 @@ async def _is_whitelisted(user_id: int, group_id: int, db: AsyncSession) -> bool
     return result.scalar_one_or_none() is not None
 
 
+async def _get_active_manual_ban(user_id: int, group_id: int, db: AsyncSession) -> Optional[UserBan]:
+    result = await db.execute(
+        select(UserBan).where(
+            UserBan.telegram_id == user_id,
+            UserBan.lifted_at.is_(None),
+            or_(UserBan.scope == "global", UserBan.group_id == group_id),
+        )
+    )
+    return result.scalars().first()
+
+
 class ModerationEngine:
     """Stateless engine: each evaluate() call queries the DB for group-specific config."""
 
@@ -68,6 +79,25 @@ class ModerationEngine:
                 requires_verification=False,
                 requires_manual_review=False,
                 details={"reason": "whitelisted"},
+            )
+
+        active_ban = await _get_active_manual_ban(user_id, group_id, db)
+        if active_ban:
+            logger.info(
+                "User manually banned: blocking", user_id=user_id, group_id=group_id,
+                scope=active_ban.scope,
+            )
+            return ScoringResult(
+                user_id=user_id,
+                total_score=-100.0,
+                matched_rules=[RuleMatch(
+                    "banned_user", "Manual ban", -100.0,
+                    {"scope": active_ban.scope, "reason": active_ban.reason},
+                )],
+                decision=DecisionEnum.banned,
+                requires_verification=False,
+                requires_manual_review=False,
+                details={"reason": "manual_ban"},
             )
 
         cfg = await _load_group_config(db, group_id)

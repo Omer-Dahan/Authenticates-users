@@ -15,9 +15,11 @@ from database.models import (
 from database.clone_utils import get_difference_summary, clone_group_settings
 from bot.keyboards.settings_kb import (
     main_settings_kb, security_mode_kb, back_to_main_kb, languages_list_kb,
-    import_list_kb, import_confirm_kb, notify_settings_kb,
+    import_list_kb, import_confirm_kb, notify_settings_kb, ban_scope_kb, admin_review_kb,
 )
 from bot.handlers.admin_utils import register_group_admin, mark_settings_edited
+from moderation.actions import ban_user, BanReport
+from config import settings
 from logs import get_logger
 
 logger = get_logger(__name__)
@@ -373,6 +375,20 @@ async def cmd_threshold(message: Message) -> None:
 
 # ─── Manual review callbacks (approve/reject/ban via inline buttons) ──────────
 
+def _format_ban_report(report: BanReport) -> str:
+    lines = []
+    if report.banned_in:
+        lines.append("🔨 נחסם בקבוצות: " + ", ".join(report.banned_in))
+    if report.removed_from:
+        lines.append("🚪 הוסר מהקבוצות: " + ", ".join(report.removed_from))
+    if report.failed:
+        failed_str = "\n".join(f"  - {title}: {err}" for title, err in report.failed)
+        lines.append("⚠️ כשל בקבוצות:\n" + failed_str)
+    if report.skipped:
+        lines.append("⏭ קבוצות שדולגו: " + ", ".join(report.skipped))
+    return "\n".join(lines) if lines else "לא בוצעה פעולה באף קבוצה."
+
+
 @router.callback_query(F.data.startswith("rev:"))
 async def cb_manual_review(callback: CallbackQuery, bot: Bot) -> None:
     parts = callback.data.split(":")
@@ -384,6 +400,13 @@ async def cb_manual_review(callback: CallbackQuery, bot: Bot) -> None:
         join_req = await db.get(JoinRequest, join_request_id)
         if not join_req or join_req.decision not in (DecisionEnum.pending, DecisionEnum.manual_review):
             await callback.answer("הבקשה כבר טופלה.")
+            return
+
+        group = await db.get(Group, join_req.group_id) if join_req.group_id else None
+        is_super = callback.from_user.id == settings.super_admin_id
+        is_owner = group is not None and callback.from_user.id == group.owner_id
+        if not (is_super or is_owner):
+            await callback.answer("⛔ אין לך הרשאה לבצע פעולה זו.", show_alert=True)
             return
 
         reviewer = callback.from_user.username or str(callback.from_user.id)
@@ -407,14 +430,55 @@ async def cb_manual_review(callback: CallbackQuery, bot: Bot) -> None:
             label = "❌ נדחה"
 
         elif action == "ban":
-            try:
-                await bot.ban_chat_member(join_req.chat_id, user_id)
-                await bot.decline_chat_join_request(join_req.chat_id, user_id)
-            except TelegramAPIError as e:
-                await callback.answer(f"שגיאה: {e}")
+            if not group:
+                await callback.answer("שגיאה: קבוצה לא נמצאה.")
                 return
-            join_req.decision = DecisionEnum.banned
-            label = "🔨 חסום"
+            kb = ban_scope_kb(user_id, join_request_id, group.id, owner_only=not is_super)
+            try:
+                await callback.message.edit_reply_markup(reply_markup=kb)
+            except TelegramAPIError:
+                pass
+            await callback.answer("בחר סוג חסימה:")
+            return
+
+        elif action == "ban_cancel":
+            group_id_cb = int(parts[4])
+            try:
+                await callback.message.edit_reply_markup(
+                    reply_markup=admin_review_kb(user_id, join_request_id, group_id_cb)
+                )
+            except TelegramAPIError:
+                pass
+            await callback.answer("בוטל.")
+            return
+
+        elif action == "ban_scope":
+            group_id_cb = int(parts[4])
+            scope = parts[5]
+            if not is_super:
+                if group_id_cb != join_req.group_id:
+                    await callback.answer("⛔ אין לך הרשאה לחסום בקבוצה אחרת.", show_alert=True)
+                    return
+                if scope != "local":
+                    await callback.answer("בעל קבוצה יכול לבחור רק חסימה מקומית.", show_alert=True)
+                    return
+
+            join_req.reviewed_by = reviewer
+
+            report = await ban_user(
+                bot, user_id, scope,
+                group_id=group_id_cb, actor_id=callback.from_user.id,
+                actor_name=reviewer, db=db,
+            )
+            await callback.answer("בוצעה חסימה.")
+            try:
+                await callback.message.edit_text(
+                    callback.message.text + f"\n\n🔨 חסום על ידי @{reviewer}\n{_format_ban_report(report)}",
+                    parse_mode="HTML",
+                )
+            except TelegramAPIError:
+                pass
+            return
 
         else:
             await callback.answer("פעולה לא חוקית.")

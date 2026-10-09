@@ -12,6 +12,8 @@ import bot.handlers.join_requests
 import bot.handlers.settings_menu
 import bot.handlers.verification
 import bot.handlers.member_events
+import bot.handlers.ban_commands
+import bot.handlers.superadmin
 import verification.cleanup
 import recovery.state
 import recovery.heartbeat
@@ -49,6 +51,8 @@ async def test_session_factory(tmp_path, monkeypatch):
     monkeypatch.setattr(bot.handlers.settings_menu, "AsyncSessionLocal", session_factory)
     monkeypatch.setattr(bot.handlers.verification, "AsyncSessionLocal", session_factory)
     monkeypatch.setattr(bot.handlers.member_events, "AsyncSessionLocal", session_factory)
+    monkeypatch.setattr(bot.handlers.ban_commands, "AsyncSessionLocal", session_factory)
+    monkeypatch.setattr(bot.handlers.superadmin, "AsyncSessionLocal", session_factory)
     monkeypatch.setattr(verification.cleanup, "AsyncSessionLocal", session_factory)
     monkeypatch.setattr(recovery.heartbeat, "AsyncSessionLocal", session_factory)
     monkeypatch.setattr(recovery.sweep, "AsyncSessionLocal", session_factory)
@@ -72,6 +76,7 @@ def mock_bot():
     bot.approve_chat_join_request = AsyncMock()
     bot.decline_chat_join_request = AsyncMock()
     bot.ban_chat_member = AsyncMock()
+    bot.unban_chat_member = AsyncMock()
     return bot
 
 

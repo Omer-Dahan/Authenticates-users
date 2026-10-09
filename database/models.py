@@ -332,3 +332,26 @@ class GroupAdmin(Base):
     first_seen_at = Column(DateTime(timezone=True), server_default=func.now())
 
     group = relationship("Group", back_populates="admins")
+
+
+class UserBan(Base):
+    """Manual ban issued by an admin (super-admin or group owner), independent of scoring.
+
+    An active ban is lifted_at IS NULL. scope is one of "global", "global_remove",
+    "local". group_id is the origin group for "local"/"global_remove" bans and is
+    NULL for "global" bans.
+    """
+    __tablename__ = "user_bans"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    telegram_id = Column(BigInteger, nullable=False, index=True)
+    username = Column(String(255), nullable=True)
+    first_name = Column(String(255), nullable=True)
+    scope = Column(String(20), nullable=False)
+    group_id = Column(Integer, ForeignKey("groups.id"), nullable=True)
+    reason = Column(Text, nullable=True)
+    banned_by = Column(BigInteger, nullable=True)
+    banned_by_name = Column(String(255), nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    lifted_at = Column(DateTime(timezone=True), nullable=True)
+    lifted_by = Column(BigInteger, nullable=True)

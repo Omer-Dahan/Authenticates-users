@@ -263,6 +263,59 @@ def admin_review_kb(user_id: int, join_request_id: int, group_id: int) -> Inline
     return builder.as_markup()
 
 
+def ban_scope_kb(user_id: int, join_request_id: int, group_id: int, owner_only: bool = False) -> InlineKeyboardMarkup:
+    """Scope picker opened from the 🔨 חסום button on a manual-review message."""
+    builder = InlineKeyboardBuilder()
+    if not owner_only:
+        builder.row(InlineKeyboardButton(
+            text="🌐 חסימה גלובלית (כל הקבוצות)",
+            callback_data=f"rev:ban_scope:{user_id}:{join_request_id}:{group_id}:global",
+        ))
+        builder.row(InlineKeyboardButton(
+            text="🚪 הסרה מכל הקבוצות, חסימה כאן בלבד",
+            callback_data=f"rev:ban_scope:{user_id}:{join_request_id}:{group_id}:global_remove",
+        ))
+    builder.row(InlineKeyboardButton(
+        text="📍 חסימה מקומית (קבוצה זו בלבד)",
+        callback_data=f"rev:ban_scope:{user_id}:{join_request_id}:{group_id}:local",
+    ))
+    builder.row(InlineKeyboardButton(
+        text="❌ ביטול",
+        callback_data=f"rev:ban_cancel:{user_id}:{join_request_id}:{group_id}",
+    ))
+    return builder.as_markup()
+
+
+def ban_scope_picker_kb(telegram_id: int) -> InlineKeyboardMarkup:
+    """Scope picker used by the /ban command and the super-admin panel."""
+    builder = InlineKeyboardBuilder()
+    builder.row(InlineKeyboardButton(
+        text="🌐 חסימה גלובלית (כל הקבוצות)",
+        callback_data=f"ban:scope:{telegram_id}:global",
+    ))
+    builder.row(InlineKeyboardButton(
+        text="🚪 הסרה מכל הקבוצות, חסימה בקבוצה הנוכחית בלבד",
+        callback_data=f"ban:scope:{telegram_id}:global_remove",
+    ))
+    builder.row(InlineKeyboardButton(
+        text="📍 חסימה מקומית (קבוצה נוכחית בלבד)",
+        callback_data=f"ban:scope:{telegram_id}:local",
+    ))
+    return builder.as_markup()
+
+
+def bans_list_kb(bans: list) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    for b in bans:
+        label = f"@{b.username}" if b.username else str(b.telegram_id)
+        builder.row(
+            InlineKeyboardButton(text=f"🚫 {label} ({b.scope})", callback_data=f"ban:noop:{b.id}"),
+            InlineKeyboardButton(text="✅ הסר חסימה", callback_data=f"ban:lift:{b.id}"),
+        )
+    builder.row(InlineKeyboardButton(text="◀️ חזרה", callback_data="sa:main"))
+    return builder.as_markup()
+
+
 def import_list_kb(target_group_id: int, other_groups: list) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     for g in other_groups:

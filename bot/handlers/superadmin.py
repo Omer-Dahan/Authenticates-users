@@ -7,7 +7,8 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from sqlalchemy import select, func
 
 from database.session import AsyncSessionLocal
-from database.models import Group, JoinRequest, DecisionEnum, ModerationLog
+from database.models import Group, JoinRequest, DecisionEnum, ModerationLog, UserBan
+from bot.keyboards.settings_kb import ban_scope_picker_kb, bans_list_kb
 from config import settings
 from logs import get_logger
 
@@ -75,6 +76,9 @@ async def cmd_admin(message: Message) -> None:
         InlineKeyboardButton(text="🔍 חיפוש משתמש", callback_data="sa:search_user"),
         InlineKeyboardButton(text="📢 שידור", callback_data="sa:broadcast"),
     )
+    builder.row(
+        InlineKeyboardButton(text="🚫 חסימות", callback_data="sa:bans"),
+    )
 
     await message.answer(
         f"🔑 <b>פאנל סופר-אדמין</b>\n\n"
@@ -112,6 +116,9 @@ async def cb_admin_main(callback: CallbackQuery) -> None:
     builder.row(
         InlineKeyboardButton(text="🔍 חיפוש משתמש", callback_data="sa:search_user"),
         InlineKeyboardButton(text="📢 שידור", callback_data="sa:broadcast"),
+    )
+    builder.row(
+        InlineKeyboardButton(text="🚫 חסימות", callback_data="sa:bans"),
     )
 
     await callback.message.edit_text(
@@ -284,6 +291,39 @@ async def cb_recent_log(callback: CallbackQuery) -> None:
     await callback.answer()
 
 
+# ─── Bans list ────────────────────────────────────────────────────────────────
+
+@router.callback_query(F.data == "sa:bans")
+async def cb_bans_list(callback: CallbackQuery) -> None:
+    if not _is_super_admin(callback.from_user.id):
+        await callback.answer()
+        return
+
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(
+            select(UserBan).where(UserBan.lifted_at.is_(None)).order_by(UserBan.created_at.desc())
+        )
+        bans = result.scalars().all()
+
+    if not bans:
+        builder = InlineKeyboardBuilder()
+        builder.row(InlineKeyboardButton(text="◀️ חזרה", callback_data="sa:main"))
+        await callback.message.edit_text(
+            "🚫 <b>חסימות</b>\n\nאין חסימות פעילות כעת.",
+            parse_mode="HTML",
+            reply_markup=builder.as_markup(),
+        )
+        await callback.answer()
+        return
+
+    await callback.message.edit_text(
+        f"🚫 <b>חסימות פעילות ({len(bans)})</b>",
+        parse_mode="HTML",
+        reply_markup=bans_list_kb(bans),
+    )
+    await callback.answer()
+
+
 # ─── Search user ──────────────────────────────────────────────────────────────
 
 @router.callback_query(F.data == "sa:search_user")
@@ -324,7 +364,10 @@ async def cmd_search_user(message: Message) -> None:
         logs = result.scalars().all()
 
     if not logs:
-        await message.reply(f"לא נמצאו רשומות עבור {target_id}.")
+        await message.reply(
+            f"לא נמצאו רשומות עבור {target_id}.",
+            reply_markup=ban_scope_picker_kb(target_id),
+        )
         return
 
     lines = [f"🔍 <b>משתמש {target_id}</b>\n"]
@@ -335,7 +378,10 @@ async def cmd_search_user(message: Message) -> None:
         ts = log.created_at.strftime("%d/%m %H:%M") if log.created_at else "-"
         lines.append(f"{icon} gid:{log.group_id or '?'} | {log.score:+.0f} | {ts}")
 
-    await message.reply("\n".join(lines), parse_mode="HTML")
+    await message.reply(
+        "\n".join(lines), parse_mode="HTML",
+        reply_markup=ban_scope_picker_kb(target_id),
+    )
 
 
 # ─── Broadcast (stub: sends to each group owner) ─────────────────────────────

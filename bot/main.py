@@ -21,7 +21,7 @@ from verification import VerificationEngine, start_cleanup_loop
 from recovery import detect_outage, start_heartbeat_loop, run_recovery_sweep
 
 from bot.handlers import join_requests, verification, setup, settings_menu, member_events
-from bot.handlers import rules_menu, questions_menu, lists_menu, superadmin, start
+from bot.handlers import rules_menu, questions_menu, lists_menu, superadmin, start, ban_commands
 from bot.middlewares.rate_limiter import RateLimitMiddleware, RaidProtectionMiddleware
 from bot.middlewares.group_check import GroupCheckMiddleware
 
@@ -67,6 +67,7 @@ async def main() -> None:
     dp.include_router(questions_menu.router)
     dp.include_router(lists_menu.router)
     dp.include_router(join_requests.router)
+    dp.include_router(ban_commands.router)
     dp.include_router(verification.router)
     dp.include_router(member_events.router)
 
