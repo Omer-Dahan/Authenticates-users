@@ -5,6 +5,7 @@ from typing import Optional, List
 from aiogram import Bot
 from aiogram.exceptions import TelegramAPIError
 from database.models import DecisionEnum
+from bot.text import esc
 from config import settings
 from logs import get_logger
 
@@ -46,19 +47,20 @@ async def send_decision(
         return
 
     icon = _DECISION_ICON.get(decision, "❓")
-    group_str = f"{group_title}"
+    group_str = esc(group_title)
     if group_username:
-        group_str += f" (@{group_username})"
+        group_str += f" (@{esc(group_username)})"
 
-    username_str = f"@{username}" if username else "-"
+    username_str = f"@{esc(username)}" if username else "-"
     now = datetime.now(timezone.utc).strftime("%d/%m/%Y %H:%M:%S")
+    name_str = esc(user_name)
 
     if decision in (DecisionEnum.banned, DecisionEnum.rejected) and reason:
         text = (
             f"{icon} | 📍 {group_str}\n"
-            f"👤 {user_name} | ID: <code>{user_id}</code>\n"
+            f"👤 {name_str} | ID: <code>{user_id}</code>\n"
             f"📊 ניקוד: {total_score:+.0f}\n"
-            f"⚡ סיבה: {reason}\n"
+            f"⚡ סיבה: {esc(reason)}\n"
             f"🕐 {now}\n"
             f"─────────────────────────"
         )
@@ -66,7 +68,7 @@ async def send_decision(
         rules_str = _format_rules(matched_rules)
         text = (
             f"{icon} | 📍 {group_str}\n"
-            f"👤 {user_name} ({username_str}) | ID: <code>{user_id}</code>\n"
+            f"👤 {name_str} ({username_str}) | ID: <code>{user_id}</code>\n"
             f"📊 ניקוד: {total_score:+.0f}\n"
             f"🔍 כללים שהתאימו: {rules_str}\n"
             f"🕐 {now}\n"
