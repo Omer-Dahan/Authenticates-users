@@ -9,12 +9,13 @@ from typing import Optional
 from aiogram import Router, Bot, F
 from aiogram.exceptions import TelegramAPIError
 from aiogram.filters import Command
-from aiogram.types import Message, CallbackQuery
+from aiogram.types import Message, CallbackQuery, InlineKeyboardButton
+from aiogram.utils.keyboard import InlineKeyboardBuilder
 from sqlalchemy import select
 
 from database.session import AsyncSessionLocal
 from database.models import Group, TelegramUser, UserBan
-from moderation.actions import ban_user, unban_user, BanReport, VALID_SCOPES
+from moderation.actions import ban_user, unban_user, BanReport, VALID_SCOPES, purge_deleted_requests, PurgeReport
 from bot.keyboards.settings_kb import ban_scope_picker_kb, bans_list_kb
 from config import settings
 from logs import get_logger
@@ -57,6 +58,31 @@ def _pop_pending_reason(admin_id: int, target_id: int) -> Optional[str]:
     return entry["reason"]
 
 
+# The purge confirm button must act on exactly the dry run the admin saw, not
+# on whatever the callback data claims - so the dry run's scope is parked
+# server-side, keyed by admin, and consumed (one-shot) by the confirm press.
+_PENDING_PURGES: dict[int, dict] = {}
+_PENDING_PURGE_TTL = timedelta(minutes=10)
+
+
+def _store_pending_purge(admin_id: int, group_id: Optional[int]) -> None:
+    now = datetime.now(timezone.utc)
+    expired = [key for key, entry in _PENDING_PURGES.items() if now - entry["created_at"] > _PENDING_PURGE_TTL]
+    for key in expired:
+        del _PENDING_PURGES[key]
+
+    _PENDING_PURGES[admin_id] = {"group_id": group_id, "created_at": now}
+
+
+def _pop_pending_purge(admin_id: int) -> Optional[dict]:
+    entry = _PENDING_PURGES.pop(admin_id, None)
+    if entry is None:
+        return None
+    if datetime.now(timezone.utc) - entry["created_at"] > _PENDING_PURGE_TTL:
+        return None
+    return entry
+
+
 def _is_super_admin(user_id: int) -> bool:
     return user_id == settings.super_admin_id
 
@@ -73,6 +99,31 @@ def format_ban_report(report: BanReport) -> str:
     if report.skipped:
         lines.append("⏭ קבוצות שדולגו: " + ", ".join(report.skipped))
     return "\n".join(lines) if lines else "לא בוצעה פעולה באף קבוצה."
+
+
+def format_purge_report(report: PurgeReport, applied: bool) -> str:
+    lines = [f"🔍 נבדקו: {report.checked} בקשות ממתינות"]
+    if report.deleted_found:
+        lines.append(f"🗑 נמצאו חשבונות מחוקים: {len(report.deleted_found)}")
+        for title, uid, name in report.deleted_found[:20]:
+            lines.append(f"  • {name or uid} (<code>{uid}</code>) בקבוצה {title}")
+    else:
+        lines.append("🗑 לא נמצאו חשבונות מחוקים.")
+    if applied:
+        lines.append(f"✅ הוסרו בפועל: {len(report.removed)}")
+    lines.append(f"✅ פעילים: {report.alive}")
+    lines.append(f"❓ לא ניתן לקבוע: {report.inconclusive}")
+    if report.access_errors:
+        lines.append("⚠️ בעיית גישה:")
+        seen = set()
+        for title, err in report.access_errors:
+            if title in seen:
+                continue
+            seen.add(title)
+            lines.append(f"  • {title}: {err}")
+    if report.stopped_early:
+        lines.append(f"⏹ הבדיקה נעצרה אחרי {report.checked} בדיקות (הגעה למגבלה).")
+    return "\n".join(lines)
 
 
 async def _resolve_target(identifier: str, db) -> Optional[int]:
@@ -284,3 +335,76 @@ async def cb_ban_lift(callback: CallbackQuery, bot: Bot) -> None:
 @router.callback_query(F.data.startswith("ban:noop"))
 async def cb_ban_noop(callback: CallbackQuery) -> None:
     await callback.answer()
+
+
+# ─── /purge_deleted: pending requests from deleted accounts (access path 1) ───
+
+@router.message(Command("purge_deleted"))
+async def cmd_purge_deleted(message: Message, bot: Bot) -> None:
+    if not _is_super_admin(message.from_user.id):
+        await message.reply("⛔ אין לך הרשאה לבצע פעולה זו.")
+        return
+
+    parts = message.text.split(maxsplit=1)
+    target_group_id = None
+
+    async with AsyncSessionLocal() as db:
+        if len(parts) > 1:
+            try:
+                chat_id_arg = int(parts[1].strip())
+            except ValueError:
+                await message.reply("❌ יש לציין chat_id מספרי.")
+                return
+            result = await db.execute(select(Group).where(Group.chat_id == chat_id_arg))
+            group = result.scalar_one_or_none()
+            if not group:
+                await message.reply(f"❌ לא נמצאה קבוצה עם chat_id {chat_id_arg}.")
+                return
+            target_group_id = group.id
+
+        report = await purge_deleted_requests(
+            bot, group_id=target_group_id, dry_run=True,
+            actor_id=message.from_user.id,
+            actor_name=message.from_user.username or str(message.from_user.id),
+            db=db,
+        )
+
+    _store_pending_purge(message.from_user.id, target_group_id)
+
+    builder = InlineKeyboardBuilder()
+    builder.row(InlineKeyboardButton(text="🧹 בצע הסרה", callback_data="purge:apply"))
+
+    await message.reply(
+        f"🧹 <b>בדיקת בקשות ממתינות של חשבונות מחוקים</b>\n\n{format_purge_report(report, applied=False)}",
+        parse_mode="HTML",
+        reply_markup=builder.as_markup(),
+    )
+
+
+@router.callback_query(F.data == "purge:apply")
+async def cb_purge_apply(callback: CallbackQuery, bot: Bot) -> None:
+    if not _is_super_admin(callback.from_user.id):
+        await callback.answer("⛔ אין הרשאה.", show_alert=True)
+        return
+
+    pending = _pop_pending_purge(callback.from_user.id)
+    if pending is None:
+        await callback.answer("הבדיקה פגה או שכבר בוצעה. יש להריץ /purge_deleted מחדש.", show_alert=True)
+        return
+
+    async with AsyncSessionLocal() as db:
+        report = await purge_deleted_requests(
+            bot, group_id=pending["group_id"], dry_run=False,
+            actor_id=callback.from_user.id,
+            actor_name=callback.from_user.username or str(callback.from_user.id),
+            db=db,
+        )
+
+    await callback.answer("בוצע.")
+    try:
+        await callback.message.edit_text(
+            f"🧹 <b>הסרה בוצעה</b>\n\n{format_purge_report(report, applied=True)}",
+            parse_mode="HTML",
+        )
+    except TelegramAPIError:
+        pass

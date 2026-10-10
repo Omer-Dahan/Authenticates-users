@@ -9,6 +9,8 @@ from sqlalchemy import select, func
 from database.session import AsyncSessionLocal
 from database.models import Group, JoinRequest, DecisionEnum, ModerationLog, UserBan
 from bot.keyboards.settings_kb import ban_scope_picker_kb, bans_list_kb
+from bot.handlers.ban_commands import format_purge_report, _store_pending_purge
+from moderation.actions import purge_deleted_requests
 from config import settings
 from logs import get_logger
 
@@ -79,6 +81,9 @@ async def cmd_admin(message: Message) -> None:
     builder.row(
         InlineKeyboardButton(text="🚫 חסימות", callback_data="sa:bans"),
     )
+    builder.row(
+        InlineKeyboardButton(text="🧹 ממתינים של חשבונות מחוקים", callback_data="sa:purge_prompt"),
+    )
 
     await message.answer(
         f"🔑 <b>פאנל סופר-אדמין</b>\n\n"
@@ -119,6 +124,9 @@ async def cb_admin_main(callback: CallbackQuery) -> None:
     )
     builder.row(
         InlineKeyboardButton(text="🚫 חסימות", callback_data="sa:bans"),
+    )
+    builder.row(
+        InlineKeyboardButton(text="🧹 ממתינים של חשבונות מחוקים", callback_data="sa:purge_prompt"),
     )
 
     await callback.message.edit_text(
@@ -320,6 +328,36 @@ async def cb_bans_list(callback: CallbackQuery) -> None:
         f"🚫 <b>חסימות פעילות ({len(bans)})</b>",
         parse_mode="HTML",
         reply_markup=bans_list_kb(bans),
+    )
+    await callback.answer()
+
+
+# ─── Purge pending requests from deleted accounts (access path 2) ─────────────
+
+@router.callback_query(F.data == "sa:purge_prompt")
+async def cb_purge_prompt(callback: CallbackQuery, bot: Bot) -> None:
+    if not _is_super_admin(callback.from_user.id):
+        await callback.answer()
+        return
+
+    async with AsyncSessionLocal() as db:
+        report = await purge_deleted_requests(
+            bot, dry_run=True,
+            actor_id=callback.from_user.id,
+            actor_name=callback.from_user.username or str(callback.from_user.id),
+            db=db,
+        )
+
+    _store_pending_purge(callback.from_user.id, None)
+
+    builder = InlineKeyboardBuilder()
+    builder.row(InlineKeyboardButton(text="🧹 בצע הסרה", callback_data="purge:apply"))
+    builder.row(InlineKeyboardButton(text="◀️ חזרה", callback_data="sa:main"))
+
+    await callback.message.edit_text(
+        f"🧹 <b>בקשות ממתינות של חשבונות מחוקים</b>\n\n{format_purge_report(report, applied=False)}",
+        parse_mode="HTML",
+        reply_markup=builder.as_markup(),
     )
     await callback.answer()
 

@@ -1,6 +1,7 @@
 """Shared ban/unban service used by every manual-ban access path: commands, the
 manual-review button, the super-admin panel, and the terminal script.
 """
+import asyncio
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Optional
@@ -240,5 +241,186 @@ async def unban_user(
             logger.warning("Failed to unban user in group", chat_id=g.chat_id, error=str(e))
             report.failed.append((title, str(e)))
 
+    await db.commit()
+    return report
+
+
+# ─── Purge pending requests from deleted accounts ──────────────────────────────
+
+# The Bot API has no "is_deleted" flag. The only reliable signal is a probe
+# that RESOLVES but returns a User/Chat with no first_name, username, or
+# last_name - Telegram wipes the profile on deletion, and first_name is a
+# required field otherwise. These two error substrings mean an access problem
+# (group access lost, or the bot lacks admin rights), never "the user is gone":
+# never infer deletion from them, and never even attempt the fallback probe.
+_ACCESS_ERROR_MARKERS = ("not enough rights", "chat not found")
+
+PURGE_NOTE = "account deleted (empty profile)"
+
+
+@dataclass
+class PurgeReport:
+    checked: int = 0
+    deleted_found: list = field(default_factory=list)   # (title, user_id, name_from_db)
+    removed: list = field(default_factory=list)          # (title, user_id)
+    alive: int = 0
+    inconclusive: int = 0
+    access_errors: list = field(default_factory=list)    # (title, error_string)
+    per_group: dict = field(default_factory=dict)
+    stopped_early: bool = False
+
+
+def _looks_empty(first_name: Optional[str], username: Optional[str], last_name: Optional[str]) -> bool:
+    return not first_name and not username and not last_name
+
+
+async def purge_deleted_requests(
+    bot: Bot,
+    *,
+    group_id: Optional[int] = None,
+    dry_run: bool = True,
+    actor_id: Optional[int] = None,
+    actor_name: Optional[str] = None,
+    db: AsyncSession = None,
+    max_probes: int = 2000,
+) -> PurgeReport:
+    report = PurgeReport()
+    now = datetime.now(timezone.utc)
+
+    group_query = select(Group).where(Group.is_active, ~Group.is_banned)
+    if group_id is not None:
+        group_query = group_query.where(Group.id == group_id)
+    groups = (await db.execute(group_query)).scalars().all()
+
+    probes_used = 0
+
+    for g in groups:
+        title = g.title or str(g.chat_id)
+        stats = report.per_group.setdefault(title, {
+            "checked": 0, "deleted_found": 0, "removed": 0,
+            "alive": 0, "inconclusive": 0, "access_error": None,
+        })
+
+        jr_result = await db.execute(select(JoinRequest).where(
+            JoinRequest.group_id == g.id,
+            JoinRequest.decision.in_((DecisionEnum.pending, DecisionEnum.manual_review)),
+            JoinRequest.resolved_at.is_(None),
+        ))
+        join_requests = jr_result.scalars().all()
+
+        for jr in join_requests:
+            if probes_used >= max_probes:
+                report.stopped_early = True
+                break
+
+            report.checked += 1
+            stats["checked"] += 1
+            probes_used += 1
+
+            is_deleted = False
+
+            try:
+                member = await bot.get_chat_member(g.chat_id, jr.user_id)
+            except TelegramAPIError as e:
+                err = str(e)
+                if any(marker in err.lower() for marker in _ACCESS_ERROR_MARKERS):
+                    if stats["access_error"] is None:
+                        stats["access_error"] = err
+                        report.access_errors.append((title, err))
+                    report.inconclusive += 1
+                    stats["inconclusive"] += 1
+                    await asyncio.sleep(0.05)
+                    continue
+
+                await asyncio.sleep(0.05)
+                try:
+                    chat_info = await bot.get_chat(jr.user_id)
+                except TelegramAPIError:
+                    report.inconclusive += 1
+                    stats["inconclusive"] += 1
+                    await asyncio.sleep(0.05)
+                    continue
+
+                if _looks_empty(chat_info.first_name, chat_info.username, chat_info.last_name):
+                    is_deleted = True
+                else:
+                    report.alive += 1
+                    stats["alive"] += 1
+                    await asyncio.sleep(0.05)
+                    continue
+            else:
+                user = member.user
+                if _looks_empty(user.first_name, user.username, user.last_name):
+                    is_deleted = True
+                else:
+                    report.alive += 1
+                    stats["alive"] += 1
+                    await asyncio.sleep(0.05)
+                    continue
+
+            known_user = (await db.execute(
+                select(TelegramUser).where(TelegramUser.telegram_id == jr.user_id)
+            )).scalar_one_or_none()
+            db_name = None
+            if known_user:
+                db_name = " ".join(
+                    part for part in (known_user.first_name, known_user.last_name) if part
+                ) or None
+
+            report.deleted_found.append((title, jr.user_id, db_name))
+            stats["deleted_found"] += 1
+
+            if dry_run:
+                await asyncio.sleep(0.05)
+                continue
+
+            decline_error = None
+            removed_ok = False
+            try:
+                await bot.decline_chat_join_request(g.chat_id, jr.user_id)
+                removed_ok = True
+            except TelegramAPIError as e:
+                decline_error = str(e)
+                if any(marker in decline_error.lower() for marker in _ACCESS_ERROR_MARKERS):
+                    report.access_errors.append((title, decline_error))
+                    await asyncio.sleep(0.05)
+                    continue  # could not remove it - leave the row open
+
+            if removed_ok:
+                report.removed.append((title, jr.user_id))
+                stats["removed"] += 1
+
+            jr.decision = DecisionEnum.rejected
+            jr.resolved_at = now
+            jr.notes = PURGE_NOTE
+            db.add(ModerationLog(
+                group_id=jr.group_id,
+                join_request_id=jr.id,
+                user_id=jr.user_id,
+                decision=DecisionEnum.rejected,
+                score=jr.score,
+                matched_rules=jr.matched_rules,
+                details={
+                    "purge_deleted": True,
+                    "evidence": "empty first_name",
+                    "decline_error": None if removed_ok else decline_error,
+                },
+            ))
+
+            session_result = await db.execute(select(VerificationSession).where(
+                VerificationSession.user_id == jr.user_id,
+                VerificationSession.chat_id == g.chat_id,
+                VerificationSession.completed_at.is_(None),
+            ))
+            for session in session_result.scalars().all():
+                session.completed_at = now
+                session.passed = False
+
+            await asyncio.sleep(0.05)
+
+        if probes_used >= max_probes:
+            break
+
+    await db.flush()
     await db.commit()
     return report

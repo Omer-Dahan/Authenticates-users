@@ -124,3 +124,97 @@ exits `0`, or `1` on a hard failure (unknown scope, missing origin group for
 `unban_user()` lifts the affected `UserBan` row(s) (`lifted_at`, `lifted_by`)
 and calls `unban_chat_member` in every group that was part of the lifted
 ban's reach.
+
+## Purging pending requests from deleted accounts
+
+A pending or manual-review `JoinRequest` can sit open forever if the
+applicant deletes their Telegram account before an admin ever looks at it.
+`moderation/actions.py::purge_deleted_requests()` sweeps for exactly that
+case and returns a `PurgeReport` (`checked`, `deleted_found`, `removed`,
+`alive`, `inconclusive`, `access_errors`, `per_group`, `stopped_early`).
+
+### Detection rule
+
+The Bot API has no `is_deleted` field anywhere on `User`. The only reliable
+signal is that `first_name` is a *required* field on a live account, so a
+probe that **resolves successfully** but returns a `User`/`Chat` with an
+empty `first_name` and no `username`/`last_name` means the account was
+deleted:
+
+1. Probe `getChatMember(chat_id, user_id)` for the request's group and user.
+   - Success with an empty `first_name`/`username`/`last_name` → deleted
+     candidate.
+   - Success with anything else → alive.
+   - Any `TelegramAPIError` → the row is left alone for now; one extra
+     read-only `getChat(user_id)` probe is made as a second check, *unless*
+     the error is one of the access-problem strings below, in which case the
+     row is reported and left untouched without the extra probe.
+2. The extra `getChat(user_id)` probe: success with an empty profile means
+   deleted; any error (the common case - most applicants never DMed the bot)
+   means the row stays **inconclusive** and untouched.
+
+### Errors that are NOT evidence of deletion
+
+- `Bad Request: member not found` and `Bad Request: PARTICIPANT_ID_INVALID` -
+  routine for any pending requester, zero discriminating power. Never
+  inferred as deletion.
+- `Bad Request: chat not found` from the `getChatMember` call (where
+  `chat_id` is the group) means the bot lost access to that **group**, not
+  that the user is gone. Reported in `access_errors`; the row is never
+  touched.
+- `Bad Request: not enough rights` means the bot lacks admin rights
+  (`can_invite_users`) in that group. Also reported in `access_errors` and
+  never touched. Closing a live applicant's request by mistake is the worst
+  possible outcome of this feature, so both of these short-circuit straight
+  to "leave it alone" without even trying the `getChat` fallback.
+
+### What happens to a confirmed deleted candidate
+
+- `dry_run=True` (always the first pass): added to `deleted_found`, nothing
+  else changes.
+- `dry_run=False`: `decline_chat_join_request(chat_id, user_id)` is called.
+  - Success → counted in `removed`.
+  - `not enough rights` / `chat not found` → `access_errors`, the row is
+    left **open** (it could not actually be removed).
+  - Any other error → treated as already gone on Telegram's side; the row is
+    still closed, but the raw error string is stored in the `ModerationLog`
+    row's `details.decline_error` so the bucketing above can be corrected
+    from real data later (what Telegram actually returns for a vanished
+    request is unverified).
+
+  Closing a row sets `decision = DecisionEnum.rejected`,
+  `resolved_at = now`, `notes = "account deleted (empty profile)"`, closes
+  the user's open `VerificationSession` rows for that chat, and adds a
+  `ModerationLog` with `details={"purge_deleted": True, "evidence": "empty
+  first_name", "decline_error": ...}`.
+
+Probes are throttled with `await asyncio.sleep(0.05)` between Telegram calls
+and capped at `max_probes` (default 2000); hitting the cap sets
+`report.stopped_early = True` and the report says so.
+
+### Dry-run-then-confirm flow
+
+Every access path below always runs a dry run first and shows the Hebrew
+summary with an inline "🧹 בצע הסרה" button (plain `purge:apply`, carrying
+no group id or actor in the callback data). The dry run's scope is instead
+parked server-side in a short-lived, one-shot record keyed by the
+super-admin's telegram id (10 minute TTL). The confirm press consumes that
+record: a missing or expired record (already used, timed out, or never
+started) refuses and performs no purge, telling the admin to run
+`/purge_deleted` again. Nothing is ever removed without that record, and the
+confirm press re-checks super-admin authorization independently.
+
+1. `/purge_deleted [chat_id]` in `bot/handlers/ban_commands.py` - super-admin
+   only. Omit `chat_id` to scan every active, non-banned group.
+2. The super-admin panel (`bot/handlers/superadmin.py`) has a
+   "🧹 ממתינים של חשבונות מחוקים" button (`sa:purge_prompt`) that runs the
+   same dry run across every group and shows the same confirm button.
+3. `scripts/purge_deleted.py` - terminal CLI:
+
+   ```
+   venv/bin/python scripts/purge_deleted.py [--group <chat_id>] [--apply] [--actor <telegram_id>]
+   ```
+
+   Calls `init_db()` first (same reason as `scripts/ban_user.py`: the tables
+   are created by the bot at startup), defaults to a dry run, and only
+   mutates anything with `--apply`.
