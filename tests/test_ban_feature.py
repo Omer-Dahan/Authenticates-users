@@ -5,7 +5,9 @@ from unittest.mock import AsyncMock
 import pytest
 from sqlalchemy import select
 from aiogram.exceptions import TelegramAPIError
+from aiogram.types import Message
 
+from config import settings
 from database.models import (
     Group, JoinRequest, DecisionEnum, ModerationLog, VerificationSession,
     TelegramUser, UserBan,
@@ -13,8 +15,8 @@ from database.models import (
 from moderation import ModerationEngine
 from moderation.actions import ban_user, unban_user
 from bot.handlers.settings_menu import cb_manual_review
-from bot.handlers.ban_commands import cb_ban_scope, cb_ban_lift
-from tests.conftest import make_tg_user, make_callback_query
+from bot.handlers.ban_commands import cb_ban_scope, cb_ban_lift, cmd_ban, cmd_unban
+from tests.conftest import make_tg_user, make_tg_chat, make_callback_query
 
 
 @pytest.fixture
@@ -558,3 +560,69 @@ async def test_unban_global_remove_without_ban_id_unbans_every_group(
     assert mock_bot.unban_chat_member.call_count == 2
     unbanned_chat_ids = {call.args[0] for call in mock_bot.unban_chat_member.call_args_list}
     assert unbanned_chat_ids == {sample_group.chat_id, second_group.chat_id}
+
+
+# ─── 14. "User not found" replies escape HTML-unsafe identifiers ──────────────
+#
+# Production log: an admin ran "/ban <@yael43>"; the "not found" reply
+# interpolated the raw identifier into a message sent with the bot's default
+# HTML parse_mode, so Telegram's "<@yael43" was parsed as an unsupported
+# start tag and the whole update crashed with an unhandled TelegramBadRequest
+# (the admin never got a reply). Same root cause as the hardcoded
+# "<telegram_id|@username>" usage strings, which would crash the same way on
+# a plain "/ban" with no arguments.
+
+@pytest.mark.asyncio
+async def test_ban_not_found_reply_escapes_html_unsafe_identifier(
+    test_session_factory, mock_bot,
+):
+    message = AsyncMock(spec=Message)
+    message.text = "/ban <@yael43>"
+    message.from_user = make_tg_user(user_id=424242, username="admin")
+    message.chat = make_tg_chat()
+    message.reply = AsyncMock()
+
+    await cmd_ban(message, mock_bot)
+
+    message.reply.assert_called_once()
+    sent_text = message.reply.call_args.args[0]
+    assert "<@yael43>" not in sent_text
+    assert "&lt;@yael43&gt;" in sent_text
+
+
+@pytest.mark.asyncio
+async def test_ban_usage_message_escapes_literal_angle_brackets(
+    test_session_factory, mock_bot,
+):
+    message = AsyncMock(spec=Message)
+    message.text = "/ban"
+    message.from_user = make_tg_user(user_id=424242, username="admin")
+    message.chat = make_tg_chat()
+    message.reply = AsyncMock()
+
+    await cmd_ban(message, mock_bot)
+
+    sent_text = message.reply.call_args.args[0]
+    assert "<telegram_id" not in sent_text
+    assert "&lt;telegram_id" in sent_text
+
+
+@pytest.mark.asyncio
+async def test_unban_not_found_reply_escapes_html_unsafe_identifier(
+    test_session_factory, mock_bot, monkeypatch,
+):
+    admin = make_tg_user(user_id=424242, username="admin")
+    monkeypatch.setattr(settings, "super_admin_id", admin.id)
+
+    message = AsyncMock(spec=Message)
+    message.text = "/unban <@yael43>"
+    message.from_user = admin
+    message.chat = make_tg_chat()
+    message.reply = AsyncMock()
+
+    await cmd_unban(message, mock_bot)
+
+    message.reply.assert_called_once()
+    sent_text = message.reply.call_args.args[0]
+    assert "<@yael43>" not in sent_text
+    assert "&lt;@yael43&gt;" in sent_text

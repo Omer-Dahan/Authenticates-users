@@ -81,6 +81,36 @@ silently losing pending join requests and verification timers.
    NULL`) - so it can't decline a user the sweep is about to approve or
    extend.
 
+## Known Telegram errors from `decline_chat_join_request` in cleanup
+
+The cleanup loop always marks an expired session's `JoinRequest` as
+`rejected` in the database regardless of whether the Telegram-side
+`decline_chat_join_request` call succeeds - the call is best-effort, and a
+failure is logged as a warning, never raised. Confirmed from production
+logs:
+
+- `Forbidden: user is deactivated` - the Telegram account was deleted
+  between the join request and the timeout. Not an error in the bot; there
+  is nothing left on Telegram's side to decline.
+- `Bad Request: HIDE_REQUESTER_MISSING` - the join request itself no longer
+  exists on Telegram's side (the user cancelled it, or it was already
+  resolved outside the bot). This confirms the "treated as already gone"
+  bucket in `docs/BAN.md`'s purge-deleted error handling.
+- `Forbidden: bot can't initiate conversation with a user` / `Forbidden: bot
+  was blocked by the user` - seen when the *verification question* send
+  fails (`bot/handlers/join_requests.py`), not the decline itself: the user
+  never started a chat with the bot, or blocked it. The join request stays
+  pending until the cleanup loop's timeout declines it.
+- Transient network errors (e.g. `ClientConnectorError: ... Connection reset
+  by peer`) are infrastructure noise, not a signal about the user or the
+  request. The row is already marked `rejected` locally before the Telegram
+  call is attempted, so a network failure here means only that Telegram
+  never received the explicit decline - the local decision is unaffected.
+
+None of these change the local decision: the session is always closed as
+`rejected` in the database so the bot's own state stays consistent even when
+the Telegram-side cleanup call fails.
+
 ## The 24-hour Telegram window - and what is NOT recoverable
 
 Telegram only retains undelivered updates for **up to 24 hours**. Anything

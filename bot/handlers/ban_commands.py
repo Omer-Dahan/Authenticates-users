@@ -4,6 +4,7 @@ The actual ban/unban logic lives in moderation/actions.py and is shared with
 the manual-review button, the super-admin panel, and the terminal script.
 """
 from datetime import datetime, timedelta, timezone
+from html import escape as html_escape
 from typing import Optional
 
 from aiogram import Router, Bot, F
@@ -145,7 +146,7 @@ async def _resolve_target(identifier: str, db) -> Optional[int]:
 async def cmd_ban(message: Message, bot: Bot) -> None:
     parts = message.text.split(maxsplit=2)
     if len(parts) < 2:
-        await message.reply("שימוש: /ban <telegram_id|@username> [סיבה]")
+        await message.reply("שימוש: /ban &lt;telegram_id|@username&gt; [סיבה]")
         return
 
     identifier = parts[1]
@@ -154,7 +155,12 @@ async def cmd_ban(message: Message, bot: Bot) -> None:
     async with AsyncSessionLocal() as db:
         telegram_id = await _resolve_target(identifier, db)
         if telegram_id is None:
-            await message.reply(f"❌ לא נמצא משתמש עבור {identifier}.")
+            # identifier is free text typed by the admin - it reaches a reply
+            # sent with the bot's default HTML parse mode, so any "<"/">" in
+            # it (e.g. a stray "/ban <@name>") must be escaped or Telegram
+            # rejects the whole message as an unsupported start tag, which
+            # crashes this update with no feedback to the admin.
+            await message.reply(f"❌ לא נמצא משתמש עבור {html_escape(identifier)}.")
             return
 
         if _is_super_admin(message.from_user.id):
@@ -250,13 +256,13 @@ async def cmd_unban(message: Message, bot: Bot) -> None:
 
     parts = message.text.split(maxsplit=1)
     if len(parts) < 2:
-        await message.reply("שימוש: /unban <telegram_id|@username>")
+        await message.reply("שימוש: /unban &lt;telegram_id|@username&gt;")
         return
 
     async with AsyncSessionLocal() as db:
         telegram_id = await _resolve_target(parts[1], db)
         if telegram_id is None:
-            await message.reply(f"❌ לא נמצא משתמש עבור {parts[1]}.")
+            await message.reply(f"❌ לא נמצא משתמש עבור {html_escape(parts[1])}.")
             return
 
         report = await unban_user(

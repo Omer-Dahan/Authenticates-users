@@ -179,8 +179,11 @@ deleted:
   - Any other error → treated as already gone on Telegram's side; the row is
     still closed, but the raw error string is stored in the `ModerationLog`
     row's `details.decline_error` so the bucketing above can be corrected
-    from real data later (what Telegram actually returns for a vanished
-    request is unverified).
+    from real data later. Confirmed from production logs: Telegram returns
+    `Bad Request: HIDE_REQUESTER_MISSING` for a join request that no longer
+    exists on its side (already cancelled or resolved outside the bot) -
+    this is the expected shape of "already gone," not a new access-problem
+    case.
 
   Closing a row sets `decision = DecisionEnum.rejected`,
   `resolved_at = now`, `notes = "account deleted (empty profile)"`, closes
