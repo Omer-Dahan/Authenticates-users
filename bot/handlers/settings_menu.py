@@ -18,6 +18,7 @@ from bot.keyboards.settings_kb import (
     import_list_kb, import_confirm_kb, notify_settings_kb, ban_scope_kb, admin_review_kb,
 )
 from bot.handlers.admin_utils import register_group_admin, mark_settings_edited
+from bot.text import esc
 from moderation.actions import ban_user, BanReport
 from config import settings
 from logs import get_logger
@@ -83,14 +84,14 @@ async def cmd_settings(message: Message, bot: Bot) -> None:
     try:
         await bot.send_message(
             user_id,
-            f"⚙️ <b>הגדרות קבוצה: {group.title}</b>\n\nבחר אפשרות:",
+            f"⚙️ <b>הגדרות קבוצה: {esc(group.title)}</b>\n\nבחר אפשרות:",
             parse_mode="HTML",
             reply_markup=main_settings_kb(group.id),
         )
         await message.reply("📬 שלחתי לך הודעה פרטית עם ההגדרות.")
     except TelegramAPIError:
         await message.reply(
-            f"⚙️ <b>הגדרות קבוצה: {group.title}</b>\n\nבחר אפשרות:",
+            f"⚙️ <b>הגדרות קבוצה: {esc(group.title)}</b>\n\nבחר אפשרות:",
             parse_mode="HTML",
             reply_markup=main_settings_kb(group.id),
         )
@@ -107,7 +108,7 @@ async def cb_main_menu(callback: CallbackQuery) -> None:
         await callback.answer("קבוצה לא נמצאה.")
         return
     await callback.message.edit_text(
-        f"⚙️ <b>הגדרות קבוצה: {group.title}</b>\n\nבחר אפשרות:",
+        f"⚙️ <b>הגדרות קבוצה: {esc(group.title)}</b>\n\nבחר אפשרות:",
         parse_mode="HTML",
         reply_markup=main_settings_kb(group_id),
     )
@@ -240,7 +241,7 @@ async def cb_stats(callback: CallbackQuery) -> None:
         rate = f"{approved / total * 100:.1f}%" if total else "-"
 
     text = (
-        f"📊 <b>סטטיסטיקות: {group.title if group else group_id}</b>\n"
+        f"📊 <b>סטטיסטיקות: {esc(group.title) if group else group_id}</b>\n"
         f"נתוני הצטרפות ומודרציה:\n\n"
         f"✅ אושרו: {counts[DecisionEnum.approved]}\n"
         f"❌ נדחו: {counts[DecisionEnum.rejected]}\n"
@@ -331,7 +332,7 @@ async def cb_thresholds(callback: CallbackQuery) -> None:
 async def cmd_threshold(message: Message) -> None:
     parts = message.text.split(maxsplit=2)
     if len(parts) != 3:
-        await message.reply("שימוש: /threshold <מפתח> <ערך>\nלדוגמה: /threshold approve_threshold 70")
+        await message.reply("שימוש: /threshold &lt;מפתח&gt; &lt;ערך&gt;\nלדוגמה: /threshold approve_threshold 70")
         return
 
     _, key, value = parts
@@ -369,7 +370,7 @@ async def cmd_threshold(message: Message) -> None:
             await _set_config(group.id, key, value, valid_keys[key], db)
         await db.commit()
 
-    names = ", ".join(g.title or str(g.chat_id) for g in groups)
+    names = ", ".join(esc(g.title or str(g.chat_id)) for g in groups)
     await message.reply(f"✅ {key} עודכן ל-{value} בקבוצות: {names}")
 
 
@@ -378,14 +379,14 @@ async def cmd_threshold(message: Message) -> None:
 def _format_ban_report(report: BanReport) -> str:
     lines = []
     if report.banned_in:
-        lines.append("🔨 נחסם בקבוצות: " + ", ".join(report.banned_in))
+        lines.append("🔨 נחסם בקבוצות: " + ", ".join(esc(t) for t in report.banned_in))
     if report.removed_from:
-        lines.append("🚪 הוסר מהקבוצות: " + ", ".join(report.removed_from))
+        lines.append("🚪 הוסר מהקבוצות: " + ", ".join(esc(t) for t in report.removed_from))
     if report.failed:
-        failed_str = "\n".join(f"  - {title}: {err}" for title, err in report.failed)
+        failed_str = "\n".join(f"  - {esc(title)}: {esc(err)}" for title, err in report.failed)
         lines.append("⚠️ כשל בקבוצות:\n" + failed_str)
     if report.skipped:
-        lines.append("⏭ קבוצות שדולגו: " + ", ".join(report.skipped))
+        lines.append("⏭ קבוצות שדולגו: " + ", ".join(esc(t) for t in report.skipped))
     return "\n".join(lines) if lines else "לא בוצעה פעולה באף קבוצה."
 
 
@@ -579,7 +580,7 @@ async def cb_imp_from(callback: CallbackQuery) -> None:
         
     await callback.message.edit_text(
         f"⚠️ <b>אזהרת דריסה!</b>\n\n"
-        f"אתה עומד לייבא הגדרות מ-<b>{source_group.title}</b> לקבוצה הנוכחית.\n\n"
+        f"אתה עומד לייבא הגדרות מ-<b>{esc(source_group.title)}</b> לקבוצה הנוכחית.\n\n"
         f"פעולה זו תמחק את ההגדרות, הכללים והשאלות הנוכחיים ותחליף אותם!\n\n"
         f"{diff_summary}\n\n"
         f"האם אתה בטוח שברצונך להמשיך?",
@@ -606,7 +607,7 @@ async def cb_imp_conf(callback: CallbackQuery) -> None:
         group = await _get_group_by_id(target_group_id, db)
         
     await callback.message.edit_text(
-        f"⚙️ <b>הגדרות קבוצה: {group.title}</b>\n\nבחר אפשרות:",
+        f"⚙️ <b>הגדרות קבוצה: {esc(group.title)}</b>\n\nבחר אפשרות:",
         parse_mode="HTML",
         reply_markup=main_settings_kb(target_group_id),
     )

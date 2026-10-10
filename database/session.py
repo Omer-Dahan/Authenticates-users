@@ -2,7 +2,10 @@ from sqlalchemy import event
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase
 from config import settings
+from logs import get_logger
 import os
+
+logger = get_logger(__name__)
 
 os.makedirs("data", exist_ok=True)
 
@@ -28,6 +31,14 @@ def configure_sqlite_pragmas(target_engine, busy_timeout_ms: int = 30000) -> Non
         cursor = dbapi_connection.cursor()
         cursor.execute("PRAGMA journal_mode=WAL")
         cursor.execute(f"PRAGMA busy_timeout={busy_timeout_ms}")
+        cursor.execute("PRAGMA journal_mode")
+        row = cursor.fetchone()
+        mode = row[0] if row else None
+        if mode is None or str(mode).lower() != "wal":
+            logger.warning(
+                "SQLite journal_mode did not switch to WAL - lock contention protection is not active",
+                journal_mode=mode,
+            )
         cursor.close()
 
 

@@ -9,6 +9,7 @@ from database.session import AsyncSessionLocal
 from database.models import GroupRule
 from bot.keyboards.settings_kb import rules_list_kb, rule_type_kb, rule_target_kb, back_to_main_kb
 from bot.handlers.admin_utils import mark_settings_edited
+from bot.text import esc
 from logs import get_logger
 
 logger = get_logger(__name__)
@@ -222,7 +223,7 @@ async def fsm_rule_enter_score(message: Message, state: FSMContext) -> None:
         f"✅ <b>כלל נשמר!</b>\n\n"
         f"🆔 {rule_id}\n"
         f"📌 {rule_type} על {target}\n"
-        f"📝 {pattern_raw[:50]}\n"
+        f"📝 {esc(pattern_raw[:50])}\n"
         f"📊 ניקוד: {sign}{score:.0f}",
         parse_mode="HTML",
         reply_markup=back_to_main_kb(group_id),

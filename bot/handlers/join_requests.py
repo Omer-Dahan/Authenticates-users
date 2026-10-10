@@ -14,6 +14,7 @@ from database.models import (
 from moderation import ModerationEngine
 from verification import VerificationEngine
 from bot.keyboards.settings_kb import admin_review_kb
+from bot.text import esc
 from tracking import send_decision
 from sqlalchemy import select
 from logs import get_logger
@@ -89,13 +90,15 @@ async def _notify_manual_review(
     join_req: JoinRequest,
     scoring_result,
 ) -> None:
-    name = f"{user.first_name or ''} {user.last_name or ''}".strip()
-    username_str = f"@{user.username}" if user.username else "no username"
+    first_name = esc(user.first_name or "")
+    last_name = esc(user.last_name or "")
+    name = f"{first_name} {last_name}".strip()
+    username_str = f"@{esc(user.username)}" if user.username else "no username"
     rules_str = ", ".join(scoring_result.matched_rule_ids) or "-"
 
     text = (
         f"⚠️ <b>סקירה ידנית נדרשת</b>\n\n"
-        f"📍 קבוצה: {group.title}\n"
+        f"📍 קבוצה: {esc(group.title)}\n"
         f"👤 {name} ({username_str})\n"
         f"🆔 ID: <code>{user.id}</code>\n"
         f"📊 ניקוד: {scoring_result.total_score:+.1f}\n"
@@ -268,7 +271,7 @@ async def handle_join_request(
                 try:
                     await bot.send_message(
                         user.id,
-                        f"🔐 <b>נדרש אימות</b>\n\n{question.question}\n\n"
+                        f"🔐 <b>נדרש אימות</b>\n\n{esc(question.question)}\n\n"
                         f"יש לך {question.max_attempts} ניסיון/ות ו-{question.timeout_seconds // 60} דקות לענות.",
                         parse_mode="HTML",
                     )

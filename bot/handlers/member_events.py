@@ -13,6 +13,7 @@ from database.models import (
     VerificationSession, OutageLog,
 )
 from verification import VerificationEngine
+from bot.text import esc
 from logs import get_logger
 
 logger = get_logger(__name__)
@@ -110,7 +111,7 @@ async def _catch_up_join(bot: Bot, db, group: Group, user_id: int, chat_id: int,
     try:
         await bot.send_message(
             user_id,
-            f"🔐 <b>נדרש אימות</b>\n\n{question.question}\n\n"
+            f"🔐 <b>נדרש אימות</b>\n\n{esc(question.question)}\n\n"
             f"יש לך {question.max_attempts} ניסיון/ות ו-{question.timeout_seconds // 60} דקות לענות.",
             parse_mode="HTML",
         )

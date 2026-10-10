@@ -16,6 +16,7 @@ from database.models import (
     VerificationSession, OutageLog, BotState,
 )
 from verification.engine import VerificationEngine
+from bot.text import esc
 from logs import get_logger
 
 logger = get_logger(__name__)
@@ -25,7 +26,7 @@ _ALREADY_IN_GROUP_STATUSES = {"creator", "administrator", "member"}
 
 def _question_prompt(question: GroupQuestion) -> str:
     return (
-        f"🔐 <b>נדרש אימות</b>\n\n{question.question}\n\n"
+        f"🔐 <b>נדרש אימות</b>\n\n{esc(question.question)}\n\n"
         f"יש לך {question.max_attempts} ניסיון/ות ו-{question.timeout_seconds // 60} דקות לענות."
     )
 
@@ -184,7 +185,7 @@ async def _send_owner_summary(bot, group_title, group_chat_id, owner_id, outage_
     minutes = max(1, int(outage_seconds // 60))
     text = (
         f"⚠️ <b>זוהתה תקלת זמינות</b>\n\n"
-        f"📍 קבוצה: {group_title or group_chat_id}\n"
+        f"📍 קבוצה: {esc(group_title) if group_title else group_chat_id}\n"
         f"🕐 שעת ההפסקה: {local_start}\n"
         f"⏱ משך משוער: כ-{minutes} דקות\n\n"
         f"✅ בקשות שהושלמו: {summary['recovered']}\n"

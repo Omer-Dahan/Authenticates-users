@@ -47,6 +47,19 @@ def format_report(report: PurgeReport, applied: bool) -> str:
             lines.append(f"  - {title}: {err}")
     if report.stopped_early:
         lines.append(f"⏹ הבדיקה נעצרה אחרי {report.checked} בדיקות (הגעה למגבלה).")
+
+    if report.per_group:
+        lines.append("")
+        lines.append("פירוט לפי קבוצה:")
+        for title, stats in report.per_group.items():
+            lines.append(f"\n{title}")
+            lines.append(
+                f"  נבדקו: {stats['checked']} | מחוקים: {stats['deleted_found']} | "
+                f"פעילים: {stats['alive']} | לא ניתן לקבוע: {stats['inconclusive']}"
+            )
+            if stats.get("access_error"):
+                lines.append(f"  שגיאת גישה: {stats['access_error']}")
+
     return "\n".join(lines)
 
 

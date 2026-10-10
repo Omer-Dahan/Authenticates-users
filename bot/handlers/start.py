@@ -9,6 +9,7 @@ from sqlalchemy import select
 from database.session import AsyncSessionLocal
 from database.models import Group, GroupAdmin
 from bot.keyboards.settings_kb import main_settings_kb
+from bot.text import esc
 from logs import get_logger
 
 logger = get_logger(__name__)
@@ -164,18 +165,18 @@ async def cb_group_detail(callback: CallbackQuery, bot: Bot) -> None:
                 return
 
     status = "🟢 פעיל" if group.is_active else "🔴 מושהה"
-    username_part = f"@{group.username}" if group.username else str(group.chat_id)
+    username_part = f"@{esc(group.username)}" if group.username else str(group.chat_id)
 
     owner_line = "" if is_owner else f"👤 הוגדר ע\"י: <code>{group.owner_id}</code>\n"
 
     if group.settings_last_edited_at and group.settings_last_edited_by_name:
         ts = group.settings_last_edited_at.strftime("%d/%m/%Y %H:%M")
-        last_edited_line = f"✏️ עריכה אחרונה: {group.settings_last_edited_by_name} | {ts}\n"
+        last_edited_line = f"✏️ עריכה אחרונה: {esc(group.settings_last_edited_by_name)} | {ts}\n"
     else:
         last_edited_line = ""
 
     text = (
-        f"📋 <b>{group.title or group.chat_id}</b>\n\n"
+        f"📋 <b>{esc(group.title) if group.title else group.chat_id}</b>\n\n"
         f"מזהה: <code>{username_part}</code>\n"
         f"סטטוס: {status}\n"
         f"{owner_line}"

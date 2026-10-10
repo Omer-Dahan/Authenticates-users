@@ -8,9 +8,9 @@ from aiogram.exceptions import TelegramAPIError
 from aiogram.types import User, ChatMemberMember, Message
 
 from database.models import DecisionEnum, JoinRequest, ModerationLog, TelegramUser, VerificationSession
-from moderation.actions import purge_deleted_requests
+from moderation.actions import purge_deleted_requests, PurgeReport
 import bot.handlers.ban_commands as ban_commands_module
-from bot.handlers.ban_commands import cb_purge_apply
+from bot.handlers.ban_commands import cb_purge_apply, format_purge_report
 from tests.conftest import make_tg_user, make_callback_query
 
 
@@ -294,3 +294,37 @@ async def test_purge_apply_without_pending_record_refuses(
             select(JoinRequest).where(JoinRequest.user_id == user_id)
         )).scalars().first()
         assert refreshed.decision == DecisionEnum.pending
+
+
+# ─── 8. format_purge_report shows a per-group breakdown, not just totals ─────
+# PurgeReport.per_group already carries per-group counters; the owner could
+# not tell which group they belonged to until format_purge_report rendered
+# them.
+
+def test_format_purge_report_includes_per_group_breakdown():
+    report = PurgeReport(
+        checked=5,
+        deleted_found=[("Group A", 1, "Name One"), ("Group B", 2, None)],
+        removed=[("Group A", 1)],
+        alive=1,
+        inconclusive=1,
+        per_group={
+            "Group A": {
+                "checked": 3, "deleted_found": 1, "removed": 1,
+                "alive": 1, "inconclusive": 0, "access_error": None,
+            },
+            "Group B": {
+                "checked": 2, "deleted_found": 1, "removed": 0,
+                "alive": 0, "inconclusive": 1, "access_error": "Bad Request: not enough rights",
+            },
+        },
+    )
+
+    text = format_purge_report(report, applied=True)
+
+    assert "Group A" in text
+    assert "Group B" in text
+    assert "נבדקו: 3" in text
+    assert "נבדקו: 2" in text
+    assert "מחוקים: 1" in text
+    assert "שגיאת גישה: Bad Request: not enough rights" in text

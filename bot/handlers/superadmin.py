@@ -10,6 +10,7 @@ from database.session import AsyncSessionLocal
 from database.models import Group, JoinRequest, DecisionEnum, ModerationLog, UserBan
 from bot.keyboards.settings_kb import ban_scope_picker_kb, bans_list_kb
 from bot.handlers.ban_commands import format_purge_report, _store_pending_purge
+from bot.text import esc
 from moderation.actions import purge_deleted_requests
 from config import settings
 from logs import get_logger
@@ -188,7 +189,7 @@ async def cb_group_info(callback: CallbackQuery) -> None:
     status = "🟢 פעילה" if group.is_active and not group.is_banned else ("🔴 חסומה" if group.is_banned else "⏸ מושהית")
 
     await callback.message.edit_text(
-        f"📋 <b>{group.title or 'ללא שם'}</b>\n\n"
+        f"📋 <b>{esc(group.title) if group.title else 'ללא שם'}</b>\n\n"
         f"🆔 Chat ID: <code>{group.chat_id}</code>\n"
         f"👤 מנהל: <code>{group.owner_id}</code>\n"
         f"📊 בקשות: {total} | ✅ {rate}\n"
@@ -282,7 +283,7 @@ async def cb_recent_log(callback: CallbackQuery) -> None:
 
     lines = ["📜 <b>50 רשומות אחרונות</b>\n"]
     for log in logs:
-        name = f"{log.first_name or ''} {log.last_name or ''}".strip() or "-"
+        name = f"{esc(log.first_name or '')} {esc(log.last_name or '')}".strip() or "-"
         icon = {"approved": "✅", "rejected": "❌", "banned": "🔨", "manual_review": "👀", "pending": "⏳"}.get(
             log.decision.value, "?"
         )
@@ -383,7 +384,7 @@ async def cmd_search_user(message: Message) -> None:
 
     parts = message.text.split(maxsplit=1)
     if len(parts) < 2:
-        await message.reply("שימוש: /search_user <telegram_id>")
+        await message.reply("שימוש: /search_user &lt;telegram_id&gt;")
         return
 
     try:
@@ -430,7 +431,7 @@ async def cb_broadcast_prompt(callback: CallbackQuery) -> None:
         await callback.answer()
         return
     await callback.message.edit_text(
-        "📢 <b>שידור הודעה</b>\n\nשלח: /broadcast <טקסט ההודעה>\nההודעה תשלח לכל מנהלי הקבוצות.",
+        "📢 <b>שידור הודעה</b>\n\nשלח: /broadcast &lt;טקסט ההודעה&gt;\nההודעה תשלח לכל מנהלי הקבוצות.",
         parse_mode="HTML",
     )
     await callback.answer()
@@ -443,10 +444,10 @@ async def cmd_broadcast(message: Message, bot: Bot) -> None:
 
     parts = message.text.split(maxsplit=1)
     if len(parts) < 2:
-        await message.reply("שימוש: /broadcast <הודעה>")
+        await message.reply("שימוש: /broadcast &lt;הודעה&gt;")
         return
 
-    text = parts[1]
+    text = esc(parts[1])
 
     async with AsyncSessionLocal() as db:
         result = await db.execute(

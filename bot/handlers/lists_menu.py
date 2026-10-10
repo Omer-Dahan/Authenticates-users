@@ -11,6 +11,7 @@ from bot.keyboards.settings_kb import (
     blacklist_list_kb, whitelist_list_kb, back_to_main_kb,
 )
 from bot.handlers.admin_utils import mark_settings_edited
+from bot.text import esc
 from logs import get_logger
 
 logger = get_logger(__name__)
@@ -114,14 +115,14 @@ async def fsm_bl_enter_score(message: Message, state: FSMContext) -> None:
             )
         )
         if existing.scalar_one_or_none():
-            await message.answer(f"⚠️ המילה '{keyword}' כבר קיימת ברשימה.", reply_markup=back_to_main_kb(group_id))
+            await message.answer(f"⚠️ המילה '{esc(keyword)}' כבר קיימת ברשימה.", reply_markup=back_to_main_kb(group_id))
             return
         db.add(GroupBlacklist(group_id=group_id, keyword=keyword, score=score))
         await mark_settings_edited(group_id, message.from_user.id, message.from_user.username, message.from_user.first_name, db)
         await db.commit()
 
     await message.answer(
-        f"✅ <b>'{keyword}'</b> נוסף לרשימה שחורה (ניקוד: {score:+.0f})",
+        f"✅ <b>'{esc(keyword)}'</b> נוסף לרשימה שחורה (ניקוד: {score:+.0f})",
         parse_mode="HTML",
         reply_markup=back_to_main_kb(group_id),
     )

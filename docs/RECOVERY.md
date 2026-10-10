@@ -141,6 +141,35 @@ past, requires the bot to already be an admin with `chat_member` explicitly in
   - it relies entirely on `VerificationSession.notified_at`, which is only
   ever set by this bot's own send calls.
 
+## SQLite WAL mode and backups
+
+The database connection (`database/session.py`) switches SQLite into WAL
+(Write-Ahead Log) journal mode on every new connection, so the app's
+concurrent async writers (heartbeat loop, cleanup loop, update handlers) do
+not fail each other with "database is locked" errors. A warning is logged if
+a connection ever fails to switch into WAL mode (for example a read-only
+file, some network filesystems, or a database owned by another user), since
+in that case the old lock-contention behavior silently comes back.
+
+In WAL mode, committed data can live in two sidecar files next to the main
+database file, not just in the `.db` file itself:
+
+- `<database>.db-wal` - the write-ahead log, holding recently committed
+  transactions that have not yet been checkpointed into the main file.
+- `<database>.db-shm` - a shared-memory index used to coordinate readers and
+  writers over the WAL file.
+
+A backup or copy that only takes the `.db` file while the bot is running can
+therefore miss committed data sitting in `-wal` that has not been
+checkpointed yet. A safe backup must do one of the following:
+
+- Copy the `.db`, `-wal`, and `-shm` files together, while the bot is fully
+  stopped (so no writer can checkpoint or write mid-copy).
+- Or use SQLite's own backup mechanism instead of copying files directly,
+  which is safe to run while the bot is live:
+  - `sqlite3 data/moderation.db ".backup backup.db"`
+  - or, from any SQLite connection: `VACUUM INTO 'backup.db'`
+
 ## Configuration
 
 | Env var | Default | Meaning |

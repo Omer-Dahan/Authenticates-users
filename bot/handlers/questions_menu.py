@@ -11,6 +11,7 @@ from bot.keyboards.settings_kb import (
     questions_list_kb, question_details_kb,
     question_editor_kb, cancel_field_edit_kb
 )
+from bot.text import esc
 from logs import get_logger
 
 logger = get_logger(__name__)
@@ -105,13 +106,13 @@ async def _show_question_details(callback: CallbackQuery, group_id: int, q_id: i
 
         status = "✅ פעיל" if q.enabled else "❌ מושהה"
         ban_text = "כן" if q.ban_on_fail else "לא"
-        name_text = q.name if q.name else "ללא שם"
+        name_text = esc(q.name) if q.name else "ללא שם"
 
         text = (
             f"❓ <b>שם השאלה:</b> {name_text}\n"
             f"<b>סטטוס:</b> {status}\n\n"
-            f"<b>טקסט השאלה:</b>\n{q.question}\n\n"
-            f"<b>תשובות מקובלות:</b> {', '.join(q.accepted_answers)}\n"
+            f"<b>טקסט השאלה:</b>\n{esc(q.question)}\n\n"
+            f"<b>תשובות מקובלות:</b> {esc(', '.join(q.accepted_answers))}\n"
             f"<b>ניסיונות מותרים:</b> {q.max_attempts}\n"
             f"<b>זמן מענה:</b> {q.timeout_seconds} שניות\n"
             f"<b>חסימה בכישלון:</b> {ban_text}\n"
@@ -174,9 +175,9 @@ async def _show_editor_menu(message_or_callback, state: FSMContext) -> None:
     group_id = data["group_id"]
     editing_q_id = data.get("editing_q_id")
 
-    name = data.get("name") or "ללא שם"
-    question = data.get("question") or "ריק"
-    answers = ", ".join(data.get("accepted_answers", []))
+    name = esc(data.get("name")) if data.get("name") else "ללא שם"
+    question = esc(data.get("question")) if data.get("question") else "ריק"
+    answers = esc(", ".join(data.get("accepted_answers", [])))
     attempts = data.get("max_attempts", 3)
     timeout = data.get("timeout_seconds", 300)
     ban_text = "כן" if data.get("ban_on_fail") else "לא"
@@ -267,7 +268,7 @@ async def cb_question_edit_select_field(callback: CallbackQuery, state: FSMConte
         await state.set_state(QuestionEditState.entering_name)
         await callback.message.edit_text(
             "🏷️ <b>עריכת שם השאלה</b>\n\n"
-            f"השם הנוכחי: <code>{data.get('name', '')}</code>\n\n"
+            f"השם הנוכחי: <code>{esc(data.get('name', ''))}</code>\n\n"
             "שלח כעת הודעה חדשה עם השם הרצוי:",
             parse_mode="HTML",
             reply_markup=cancel_field_edit_kb()
@@ -276,14 +277,14 @@ async def cb_question_edit_select_field(callback: CallbackQuery, state: FSMConte
         await state.set_state(QuestionEditState.entering_question)
         await callback.message.edit_text(
             "📝 <b>עריכת טקסט השאלה</b>\n\n"
-            f"הטקסט הנוכחי:\n<code>{data.get('question', '')}</code>\n\n"
+            f"הטקסט הנוכחי:\n<code>{esc(data.get('question', ''))}</code>\n\n"
             "שלח כעת הודעה חדשה עם טקסט השאלה הרצוי:",
             parse_mode="HTML",
             reply_markup=cancel_field_edit_kb()
         )
     elif field == "answers":
         await state.set_state(QuestionEditState.entering_answers)
-        answers_str = ", ".join(data.get("accepted_answers", []))
+        answers_str = esc(", ".join(data.get("accepted_answers", [])))
         await callback.message.edit_text(
             "🔑 <b>עריכת תשובות מקובלות</b>\n\n"
             f"התשובות הנוכחיות: <code>{answers_str}</code>\n\n"

@@ -4,7 +4,6 @@ The actual ban/unban logic lives in moderation/actions.py and is shared with
 the manual-review button, the super-admin panel, and the terminal script.
 """
 from datetime import datetime, timedelta, timezone
-from html import escape as html_escape
 from typing import Optional
 
 from aiogram import Router, Bot, F
@@ -18,6 +17,7 @@ from database.session import AsyncSessionLocal
 from database.models import Group, TelegramUser, UserBan
 from moderation.actions import ban_user, unban_user, BanReport, VALID_SCOPES, purge_deleted_requests, PurgeReport
 from bot.keyboards.settings_kb import ban_scope_picker_kb, bans_list_kb
+from bot.text import esc
 from config import settings
 from logs import get_logger
 
@@ -91,14 +91,14 @@ def _is_super_admin(user_id: int) -> bool:
 def format_ban_report(report: BanReport) -> str:
     lines = []
     if report.banned_in:
-        lines.append("🔨 נחסם בקבוצות: " + ", ".join(report.banned_in))
+        lines.append("🔨 נחסם בקבוצות: " + ", ".join(esc(t) for t in report.banned_in))
     if report.removed_from:
-        lines.append("🚪 הוסר מהקבוצות: " + ", ".join(report.removed_from))
+        lines.append("🚪 הוסר מהקבוצות: " + ", ".join(esc(t) for t in report.removed_from))
     if report.failed:
-        failed_str = "\n".join(f"  - {title}: {err}" for title, err in report.failed)
+        failed_str = "\n".join(f"  - {esc(title)}: {esc(err)}" for title, err in report.failed)
         lines.append("⚠️ כשל בקבוצות:\n" + failed_str)
     if report.skipped:
-        lines.append("⏭ קבוצות שדולגו: " + ", ".join(report.skipped))
+        lines.append("⏭ קבוצות שדולגו: " + ", ".join(esc(t) for t in report.skipped))
     return "\n".join(lines) if lines else "לא בוצעה פעולה באף קבוצה."
 
 
@@ -107,7 +107,8 @@ def format_purge_report(report: PurgeReport, applied: bool) -> str:
     if report.deleted_found:
         lines.append(f"🗑 נמצאו חשבונות מחוקים: {len(report.deleted_found)}")
         for title, uid, name in report.deleted_found[:20]:
-            lines.append(f"  • {name or uid} (<code>{uid}</code>) בקבוצה {title}")
+            name_display = esc(name) if name else uid
+            lines.append(f"  • {name_display} (<code>{uid}</code>) בקבוצה {esc(title)}")
     else:
         lines.append("🗑 לא נמצאו חשבונות מחוקים.")
     if applied:
@@ -121,9 +122,22 @@ def format_purge_report(report: PurgeReport, applied: bool) -> str:
             if title in seen:
                 continue
             seen.add(title)
-            lines.append(f"  • {title}: {err}")
+            lines.append(f"  • {esc(title)}: {esc(err)}")
     if report.stopped_early:
         lines.append(f"⏹ הבדיקה נעצרה אחרי {report.checked} בדיקות (הגעה למגבלה).")
+
+    if report.per_group:
+        lines.append("")
+        lines.append("📍 <b>פירוט לפי קבוצה:</b>")
+        for title, stats in report.per_group.items():
+            lines.append(f"\n<b>{esc(title)}</b>")
+            lines.append(
+                f"  נבדקו: {stats['checked']} | מחוקים: {stats['deleted_found']} | "
+                f"פעילים: {stats['alive']} | לא ניתן לקבוע: {stats['inconclusive']}"
+            )
+            if stats.get("access_error"):
+                lines.append(f"  ⚠️ שגיאת גישה: {esc(stats['access_error'])}")
+
     return "\n".join(lines)
 
 
@@ -160,7 +174,7 @@ async def cmd_ban(message: Message, bot: Bot) -> None:
             # it (e.g. a stray "/ban <@name>") must be escaped or Telegram
             # rejects the whole message as an unsupported start tag, which
             # crashes this update with no feedback to the admin.
-            await message.reply(f"❌ לא נמצא משתמש עבור {html_escape(identifier)}.")
+            await message.reply(f"❌ לא נמצא משתמש עבור {esc(identifier)}.")
             return
 
         if _is_super_admin(message.from_user.id):
@@ -262,7 +276,7 @@ async def cmd_unban(message: Message, bot: Bot) -> None:
     async with AsyncSessionLocal() as db:
         telegram_id = await _resolve_target(parts[1], db)
         if telegram_id is None:
-            await message.reply(f"❌ לא נמצא משתמש עבור {html_escape(parts[1])}.")
+            await message.reply(f"❌ לא נמצא משתמש עבור {esc(parts[1])}.")
             return
 
         report = await unban_user(
