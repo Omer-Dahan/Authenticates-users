@@ -122,7 +122,7 @@ def make_tg_chat(chat_id=-1001234567890, title="Production Community"):
     )
 
 
-def make_join_request(user=None, chat=None):
+def make_join_request(user=None, chat=None, date=None):
     if user is None:
         user = make_tg_user()
     if chat is None:
@@ -131,7 +131,7 @@ def make_join_request(user=None, chat=None):
         chat=chat,
         from_user=user,
         user_chat_id=user.id,
-        date=datetime.now(timezone.utc),
+        date=date or datetime.now(timezone.utc),
     )
 
 

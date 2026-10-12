@@ -1,5 +1,5 @@
 """Handles chat_join_request events - multi-tenant moderation flow."""
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from aiogram import Router, Bot
@@ -9,7 +9,7 @@ from aiogram.types import ChatJoinRequest
 from database.session import AsyncSessionLocal
 from database.models import (
     DecisionEnum, TelegramUser, JoinRequest, ModerationLog, Group,
-    GroupConfig,
+    GroupConfig, VerificationSession,
 )
 from moderation import ModerationEngine
 from verification import VerificationEngine
@@ -24,6 +24,17 @@ router = Router()
 
 _MODERATION_ENGINE: Optional[ModerationEngine] = None
 _VERIFICATION_ENGINE: Optional[VerificationEngine] = None
+
+# A new request must be strictly newer than the open row by more than this to
+# count as genuinely new - absorbs clock skew and routine re-delivery (e.g. the
+# outage recovery replaying the backlog) instead of treating it as a supersede.
+_SUPERSEDE_MARGIN = timedelta(seconds=60)
+
+
+def _aware(dt: datetime) -> datetime:
+    if dt is not None and dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt
 
 
 def setup_engines(mod_engine: ModerationEngine, ver_engine: VerificationEngine) -> None:
@@ -149,19 +160,75 @@ async def handle_join_request(
                 JoinRequest.user_id == user.id,
                 JoinRequest.chat_id == chat_id,
                 JoinRequest.decision.in_((DecisionEnum.pending, DecisionEnum.manual_review)),
+                JoinRequest.resolved_at.is_(None),
             )
         )
-        if unresolved.scalars().first():
-            # Same user re-requesting while an earlier request is still awaiting
-            # resolution - re-running the flow here would score them again and
-            # send the admin a second manual-review notification for what is,
-            # from the admin's point of view, the same open request.
+        unresolved_rows = list(unresolved.scalars().all())
+
+        if unresolved_rows:
+            request_date = _aware(request.date)
+            known_created_ats = [
+                _aware(row.created_at) for row in unresolved_rows if row.created_at is not None
+            ]
+            # A row with no created_at is treated as ancient rather than fresh:
+            # the goal is to unblock users, so an unknown age must never stop a
+            # genuinely new request from superseding.
+            latest_created_at = max(known_created_ats) if known_created_ats else None
+
+            if latest_created_at is not None and request_date <= latest_created_at + _SUPERSEDE_MARGIN:
+                # Not genuinely new - a re-delivery of a request we already have
+                # open (e.g. the outage recovery replaying the backlog). Running
+                # the flow again would score the user again and notify the admin
+                # a second time for what is, from their point of view, the same
+                # open request.
+                logger.info(
+                    "Join request ignored - re-delivery of an unresolved request",
+                    user_id=user.id,
+                    chat_id=chat_id,
+                )
+                return
+
+            # Genuinely newer request for a user who already has an open,
+            # unresolved request - the old row was abandoned (e.g. declined
+            # manually inside Telegram) and must not keep blocking this user
+            # forever. Close it as superseded and fall through to process the
+            # new request normally.
+            now = datetime.now(timezone.utc)
+            for old_row in unresolved_rows:
+                old_row.decision = DecisionEnum.rejected
+                old_row.resolved_at = now
+                old_row.notes = "superseded by a newer join request"
+                db.add(ModerationLog(
+                    group_id=old_row.group_id, join_request_id=old_row.id,
+                    user_id=user.id, username=user.username,
+                    first_name=user.first_name, last_name=user.last_name,
+                    decision=DecisionEnum.rejected, score=old_row.score,
+                    matched_rules=old_row.matched_rules,
+                    details={
+                        "superseded_by_new_request": True,
+                        "superseded_row_id": old_row.id,
+                        "new_request_at": request_date.isoformat(),
+                    },
+                ))
+
+            open_sessions = await db.execute(
+                select(VerificationSession).where(
+                    VerificationSession.user_id == user.id,
+                    VerificationSession.chat_id == chat_id,
+                    VerificationSession.completed_at.is_(None),
+                )
+            )
+            for session in open_sessions.scalars().all():
+                session.completed_at = now
+                session.passed = False
+
+            await db.flush()
             logger.info(
-                "Join request ignored - an unresolved request already exists",
+                "Unresolved join request(s) superseded by a newer request",
                 user_id=user.id,
                 chat_id=chat_id,
+                superseded_count=len(unresolved_rows),
             )
-            return
 
         await _ensure_user(user, db)
 
