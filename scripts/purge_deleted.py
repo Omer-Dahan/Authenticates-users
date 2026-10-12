@@ -8,6 +8,8 @@ Runnable from the project root on the host that runs the bot:
 Without --apply this is a dry run: it reports what it found and changes nothing.
 """
 import argparse
+import html
+import re
 import asyncio
 import sys
 from pathlib import Path
@@ -23,44 +25,13 @@ from database.init_db import init_db  # noqa: E402
 from database.session import AsyncSessionLocal  # noqa: E402
 from database.models import Group  # noqa: E402
 from moderation.actions import purge_deleted_requests, PurgeReport  # noqa: E402
+from bot.handlers.ban_commands import format_purge_report  # noqa: E402
 
 
 def format_report(report: PurgeReport, applied: bool) -> str:
-    lines = [f"🔍 נבדקו: {report.checked} בקשות ממתינות"]
-    if report.deleted_found:
-        lines.append(f"🗑 נמצאו חשבונות מחוקים: {len(report.deleted_found)}")
-        for title, uid, name in report.deleted_found:
-            lines.append(f"  - {name or uid} ({uid}) בקבוצה {title}")
-    else:
-        lines.append("🗑 לא נמצאו חשבונות מחוקים.")
-    if applied:
-        lines.append(f"✅ הוסרו בפועל: {len(report.removed)}")
-    lines.append(f"✅ פעילים: {report.alive}")
-    lines.append(f"❓ לא ניתן לקבוע: {report.inconclusive}")
-    if report.access_errors:
-        lines.append("⚠️ בעיית גישה:")
-        seen = set()
-        for title, err in report.access_errors:
-            if title in seen:
-                continue
-            seen.add(title)
-            lines.append(f"  - {title}: {err}")
-    if report.stopped_early:
-        lines.append(f"⏹ הבדיקה נעצרה אחרי {report.checked} בדיקות (הגעה למגבלה).")
-
-    if report.per_group:
-        lines.append("")
-        lines.append("פירוט לפי קבוצה:")
-        for title, stats in report.per_group.items():
-            lines.append(f"\n{title}")
-            lines.append(
-                f"  נבדקו: {stats['checked']} | מחוקים: {stats['deleted_found']} | "
-                f"פעילים: {stats['alive']} | לא ניתן לקבוע: {stats['inconclusive']}"
-            )
-            if stats.get("access_error"):
-                lines.append(f"  שגיאת גישה: {stats['access_error']}")
-
-    return "\n".join(lines)
+    # Same wording and buckets as the bot's report, as plain terminal text.
+    text = re.sub(r"</?(b|code)>", "", format_purge_report(report, applied))
+    return html.unescape(text)
 
 
 async def _run(args: argparse.Namespace) -> int:

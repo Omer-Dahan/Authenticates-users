@@ -131,7 +131,53 @@ A pending or manual-review `JoinRequest` can sit open forever if the
 applicant deletes their Telegram account before an admin ever looks at it.
 `moderation/actions.py::purge_deleted_requests()` sweeps for exactly that
 case and returns a `PurgeReport` (`checked`, `deleted_found`, `removed`,
-`alive`, `inconclusive`, `access_errors`, `per_group`, `stopped_early`).
+`request_gone`, `already_member`, `decline_failed`, `alive`, `inconclusive`,
+`access_errors`, `per_group`, `stopped_early`). `per_group` is keyed by
+`Group.id` (two groups with the same title stay apart) and each entry carries
+its `title`.
+
+### What the bot can and cannot know
+
+Checked against the Bot API (7.10, as shipped with the installed aiogram):
+
+- There is **no** method that lists pending join requests or chat members.
+  The only methods touching a request are `approveChatJoinRequest` and
+  `declineChatJoinRequest`.
+- The `chat_join_request` update is sent only when a request is **created**.
+  Nothing is sent when another admin approves or declines it inside the
+  Telegram app, or when the user withdraws it. So an open `JoinRequest` row
+  means "a request the bot once saw", not "a request Telegram still has".
+  The number shown in the Telegram app is the real number of pending
+  requests; the bot's number is always the same or larger.
+- `getChatMember` on a pending requester returns status `left` ("not a
+  member"). It can prove the account exists or was deleted, and that the
+  user is now a member, but never that a request is still pending.
+- `declineChatJoinRequest` is the only decisive call: `True` means the
+  request existed and is now declined, `Bad Request: HIDE_REQUESTER_MISSING`
+  means Telegram no longer has it. The purge sends it **only** for deleted
+  accounts, so a live applicant is never declined.
+
+This is why the production run reported `נבדקו 449` against roughly 30
+requests visible in the app: the 449 were open rows across every managed
+group, most of them requests that had been handled in the app or withdrawn
+long before, and the old "לא ניתן לקבוע 408" bucket read as if the bot had
+looked and found nothing, when in fact it cannot know.
+
+Two places now close such rows when Telegram does give a decisive signal
+(both database-only, nothing is sent to Telegram):
+
+- `bot/handlers/member_events.py`: a `chat_member` join (not a member before,
+  a member after) outside an outage closes the user's open rows for that
+  chat as `approved` with `notes = "joined, request resolved outside the
+  bot"`, and completes their open `VerificationSession` rows. This is what an
+  approval inside the Telegram app looks like to the bot.
+- `cb_manual_review` (approve / reject buttons): `HIDE_REQUESTER_MISSING`
+  closes the row (`rejected`, `notes = "request no longer on Telegram
+  (handled outside the bot)"`) instead of showing an error and leaving it
+  open forever.
+
+No age-based cleanup exists or is planned: an old row is not evidence that
+the request is gone.
 
 ### Detection rule
 
@@ -144,14 +190,18 @@ deleted:
 1. Probe `getChatMember(chat_id, user_id)` for the request's group and user.
    - Success with an empty `first_name`/`username`/`last_name` → deleted
      candidate.
-   - Success with anything else → alive.
+   - Success with a member status (`member`, `administrator`, `creator`, or
+     `restricted` with `is_member`) → `already_member`: the request is gone.
+   - Success with anything else → `alive`: the account exists, whether the
+     request is still pending is unknown.
    - Any `TelegramAPIError` → the row is left alone for now; one extra
      read-only `getChat(user_id)` probe is made as a second check, *unless*
      the error is one of the access-problem strings below, in which case the
      row is reported and left untouched without the extra probe.
 2. The extra `getChat(user_id)` probe: success with an empty profile means
-   deleted; any error (the common case - most applicants never DMed the bot)
-   means the row stays **inconclusive** and untouched.
+   deleted, success with a name means `alive`; any error (the common case -
+   most applicants never DMed the bot) means the row stays **inconclusive**
+   and untouched.
 
 ### Errors that are NOT evidence of deletion
 
@@ -168,28 +218,45 @@ deleted:
   possible outcome of this feature, so both of these short-circuit straight
   to "leave it alone" without even trying the `getChat` fallback.
 
-### What happens to a confirmed deleted candidate
+### What happens on apply
 
-- `dry_run=True` (always the first pass): added to `deleted_found`, nothing
-  else changes.
-- `dry_run=False`: `decline_chat_join_request(chat_id, user_id)` is called.
-  - Success → counted in `removed`.
-  - `not enough rights` / `chat not found` → `access_errors`, the row is
-    left **open** (it could not actually be removed).
-  - Any other error → treated as already gone on Telegram's side; the row is
-    still closed, but the raw error string is stored in the `ModerationLog`
-    row's `details.decline_error` so the bucketing above can be corrected
-    from real data later. Confirmed from production logs: Telegram returns
-    `Bad Request: HIDE_REQUESTER_MISSING` for a join request that no longer
-    exists on its side (already cancelled or resolved outside the bot) -
-    this is the expected shape of "already gone," not a new access-problem
-    case.
+- `dry_run=True` (always the first pass): rows are only counted, nothing
+  changes on Telegram or in the database.
+- `dry_run=False`:
+  - `already_member` rows are closed as `approved` with `notes = "already a
+    member, request resolved outside the bot"`. No Telegram call.
+  - Deleted candidates get `decline_chat_join_request(chat_id, user_id)`:
+    - `True` → `removed` (Telegram still had the request), row closed with
+      `notes = "account deleted (empty profile)"`.
+    - `HIDE_REQUESTER_MISSING` → `request_gone` (Telegram no longer had it),
+      row closed with `notes = "account deleted, request no longer on
+      Telegram"`.
+    - Any other error (access, flood, network) → `decline_failed`, the row
+      stays **open**: nothing decisive came back, so the request may still
+      exist. Access errors are also listed in `access_errors`.
+  - `alive` and `inconclusive` rows are never touched.
 
-  Closing a row sets `decision = DecisionEnum.rejected`,
-  `resolved_at = now`, `notes = "account deleted (empty profile)"`, closes
-  the user's open `VerificationSession` rows for that chat, and adds a
-  `ModerationLog` with `details={"purge_deleted": True, "evidence": "empty
-  first_name", "decline_error": ...}`.
+  Closing a deleted candidate's row sets `decision = DecisionEnum.rejected`,
+  `resolved_at = now`, closes the user's open `VerificationSession` rows for
+  that chat, and adds a `ModerationLog` with `details={"purge_deleted": True,
+  "evidence": "empty first_name", "decline_error": ...}`.
+
+### The numbers in the report
+
+| Label | Meaning |
+| --- | --- |
+| 📦 בקשות פתוחות במסד הנתונים של הבוט | `checked`: open rows the bot holds, not requests Telegram has |
+| 🗑 חשבונות מחוקים | `deleted_found` |
+| ✅ טלגרם עדיין הכיר את הבקשה, ונדחתה | `removed` (apply only) |
+| 👻 טלגרם כבר לא הכיר את הבקשה, נסגרה אצל הבוט | `request_gone` (apply only) |
+| 👥 כבר חברים בקבוצה | `already_member` |
+| ⚠️ הדחייה נכשלה, השורה נשארה פתוחה | `decline_failed` (apply only) |
+| ❔ החשבון קיים, לא ידוע אם הבקשה עדיין ממתינה | `alive` |
+| ❓ טלגרם לא החזיר מידע, לא ידוע אם הבקשה קיימת | `inconclusive` |
+
+Every report ends with a note that the bot cannot see Telegram's list and
+that the number in the app is the real one. The terminal script prints the
+same report as plain text.
 
 Probes are throttled with `await asyncio.sleep(0.05)` between Telegram calls
 and capped at `max_probes` (default 2000); hitting the cap sets
@@ -198,21 +265,31 @@ and capped at `max_probes` (default 2000); hitting the cap sets
 ### Dry-run-then-confirm flow
 
 Every access path below always runs a dry run first and shows the Hebrew
-summary with an inline "🧹 בצע הסרה" button (plain `purge:apply`, carrying
-no group id or actor in the callback data). The dry run's scope is instead
-parked server-side in a short-lived, one-shot record keyed by the
-super-admin's telegram id (10 minute TTL). The confirm press consumes that
-record: a missing or expired record (already used, timed out, or never
-started) refuses and performs no purge, telling the admin to run
-`/purge_deleted` again. Nothing is ever removed without that record, and the
-confirm press re-checks super-admin authorization independently.
+summary with a confirm button that carries no actor in the callback data.
+The dry run's scope is instead parked server-side in a short-lived, one-shot
+record keyed by the admin's telegram id (10 minute TTL,
+`_store_pending_purge` / `_pop_pending_purge` in `ban_commands.py`). The
+confirm press consumes that record: a missing or expired record (already
+used, timed out, or never started) refuses and performs no purge. Nothing is
+ever removed without that record, and the confirm press re-checks
+authorization independently.
 
 1. `/purge_deleted [chat_id]` in `bot/handlers/ban_commands.py` - super-admin
-   only. Omit `chat_id` to scan every active, non-banned group.
+   only, confirm button `purge:apply`. Omit `chat_id` to scan every active,
+   non-banned group.
 2. The super-admin panel (`bot/handlers/superadmin.py`) has a
    "🧹 ממתינים של חשבונות מחוקים" button (`sa:purge_prompt`) that runs the
    same dry run across every group and shows the same confirm button.
-3. `scripts/purge_deleted.py` - terminal CLI:
+3. The group settings menu (`/settings` → "🧹 ממתינים של חשבונות מחוקים",
+   `sm:purge:<group_id>` in `bot/handlers/settings_menu.py`): a dry run
+   scoped to that one group, for the same people who can open that group's
+   screen (the group owner or an admin registered for that group via
+   `/settings`, plus the super-admin). The confirm button
+   `sm:purge_apply:<group_id>` is only shown when there is something to act
+   on, and acts only if the pending record was created by the same admin for
+   the **same** group: a crafted confirm for a group that was never shown,
+   or a second press, is refused.
+4. `scripts/purge_deleted.py` - terminal CLI:
 
    ```
    venv/bin/python scripts/purge_deleted.py [--group <chat_id>] [--apply] [--actor <telegram_id>]

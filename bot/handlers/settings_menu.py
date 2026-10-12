@@ -9,17 +9,19 @@ from sqlalchemy import select, func
 
 from database.session import AsyncSessionLocal
 from database.models import (
-    Group, GroupConfig, GroupLanguageFilter,
+    Group, GroupAdmin, GroupConfig, GroupLanguageFilter,
     JoinRequest, DecisionEnum, ModerationLog,
 )
 from database.clone_utils import get_difference_summary, clone_group_settings
 from bot.keyboards.settings_kb import (
     main_settings_kb, security_mode_kb, back_to_main_kb, languages_list_kb,
     import_list_kb, import_confirm_kb, notify_settings_kb, ban_scope_kb, admin_review_kb,
+    purge_settings_kb,
 )
 from bot.handlers.admin_utils import register_group_admin, mark_settings_edited
+from bot.handlers.ban_commands import format_purge_report, _store_pending_purge, _pop_pending_purge
 from bot.text import esc
-from moderation.actions import ban_user, BanReport
+from moderation.actions import ban_user, BanReport, purge_deleted_requests, is_request_missing_error
 from config import settings
 from logs import get_logger
 
@@ -217,6 +219,95 @@ async def cb_set_notify(callback: CallbackQuery) -> None:
     )
 
 
+# ─── Pending requests from deleted accounts ───────────────────────────────────
+
+async def _can_manage_group(group: Group, user_id: int, db) -> bool:
+    """Same access rule as the group screen (start:group): owner or registered admin."""
+    if user_id == settings.super_admin_id or group.owner_id == user_id:
+        return True
+    result = await db.execute(
+        select(GroupAdmin).where(GroupAdmin.group_id == group.id, GroupAdmin.admin_user_id == user_id)
+    )
+    return result.scalar_one_or_none() is not None
+
+
+@router.callback_query(F.data.startswith("sm:purge:"))
+async def cb_purge_menu(callback: CallbackQuery, bot: Bot) -> None:
+    group_id = int(callback.data.split(":")[2])
+
+    async with AsyncSessionLocal() as db:
+        group = await _get_group_by_id(group_id, db)
+        if not group:
+            await callback.answer("קבוצה לא נמצאה.")
+            return
+        if not await _can_manage_group(group, callback.from_user.id, db):
+            await callback.answer("אין לך גישה לקבוצה זו.", show_alert=True)
+            return
+
+        # First press: a dry run scoped to this group only. Nothing is declined
+        # and no row is closed until the confirm button below is pressed.
+        report = await purge_deleted_requests(
+            bot, group_id=group.id, dry_run=True,
+            actor_id=callback.from_user.id,
+            actor_name=callback.from_user.username or str(callback.from_user.id),
+            db=db,
+        )
+
+    can_apply = bool(report.deleted_found or report.already_member)
+    if can_apply:
+        _store_pending_purge(callback.from_user.id, group.id)
+
+    footer = (
+        "לחץ על <b>אישור הסרה</b> כדי לדחות את בקשות החשבונות המחוקים ולסגור "
+        "את השורות של מי שכבר חבר בקבוצה."
+        if can_apply else "אין מה להסיר בקבוצה זו."
+    )
+    await callback.message.edit_text(
+        f"🧹 <b>חשבונות מחוקים בבקשות ממתינות: {esc(group.title)}</b>\n"
+        f"בדיקה בלבד, עדיין לא הוסר דבר.\n\n"
+        f"{format_purge_report(report, applied=False)}\n\n"
+        f"{footer}",
+        parse_mode="HTML",
+        reply_markup=purge_settings_kb(group.id, can_apply),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("sm:purge_apply:"))
+async def cb_purge_apply_group(callback: CallbackQuery, bot: Bot) -> None:
+    group_id = int(callback.data.split(":")[2])
+
+    async with AsyncSessionLocal() as db:
+        group = await _get_group_by_id(group_id, db)
+        if not group or not await _can_manage_group(group, callback.from_user.id, db):
+            await callback.answer("אין לך גישה לקבוצה זו.", show_alert=True)
+            return
+
+        # The confirm acts only on the dry run this admin was shown for this
+        # exact group, and only once: the record is consumed here.
+        pending = _pop_pending_purge(callback.from_user.id)
+        if pending is None or pending["group_id"] != group.id:
+            await callback.answer("הבדיקה פגה או שכבר בוצעה. יש להריץ את הבדיקה מחדש.", show_alert=True)
+            return
+
+        report = await purge_deleted_requests(
+            bot, group_id=pending["group_id"], dry_run=False,
+            actor_id=callback.from_user.id,
+            actor_name=callback.from_user.username or str(callback.from_user.id),
+            db=db,
+        )
+
+    await callback.answer("בוצע.")
+    try:
+        await callback.message.edit_text(
+            f"🧹 <b>הסרה בוצעה: {esc(group.title)}</b>\n\n{format_purge_report(report, applied=True)}",
+            parse_mode="HTML",
+            reply_markup=back_to_main_kb(group.id),
+        )
+    except TelegramAPIError:
+        pass
+
+
 # ─── Statistics ───────────────────────────────────────────────────────────────
 
 @router.callback_query(F.data.startswith("sm:stats:"))
@@ -412,21 +503,30 @@ async def cb_manual_review(callback: CallbackQuery, bot: Bot) -> None:
 
         reviewer = callback.from_user.username or str(callback.from_user.id)
 
+        # HIDE_REQUESTER_MISSING means the request was already handled in the
+        # Telegram app or withdrawn - nothing is pending any more, so the row is
+        # closed instead of staying open forever behind an error message.
+        request_missing = False
+
         if action == "approve":
             try:
                 await bot.approve_chat_join_request(join_req.chat_id, user_id)
             except TelegramAPIError as e:
-                await callback.answer(f"שגיאה: {e}")
-                return
-            join_req.decision = DecisionEnum.approved
+                if not is_request_missing_error(str(e)):
+                    await callback.answer(f"שגיאה: {e}")
+                    return
+                request_missing = True
+            join_req.decision = DecisionEnum.rejected if request_missing else DecisionEnum.approved
             label = "✅ אושר"
 
         elif action == "reject":
             try:
                 await bot.decline_chat_join_request(join_req.chat_id, user_id)
             except TelegramAPIError as e:
-                await callback.answer(f"שגיאה: {e}")
-                return
+                if not is_request_missing_error(str(e)):
+                    await callback.answer(f"שגיאה: {e}")
+                    return
+                request_missing = True
             join_req.decision = DecisionEnum.rejected
             label = "❌ נדחה"
 
@@ -485,6 +585,10 @@ async def cb_manual_review(callback: CallbackQuery, bot: Bot) -> None:
             await callback.answer("פעולה לא חוקית.")
             return
 
+        if request_missing:
+            join_req.notes = "request no longer on Telegram (handled outside the bot)"
+            label = "👻 הבקשה כבר לא קיימת בטלגרם (טופלה מחוץ לבוט), נסגרה"
+
         join_req.reviewed_by = reviewer
         join_req.resolved_at = datetime.now(timezone.utc)
 
@@ -495,7 +599,7 @@ async def cb_manual_review(callback: CallbackQuery, bot: Bot) -> None:
             decision=join_req.decision,
             score=join_req.score,
             matched_rules=join_req.matched_rules,
-            details={"manual_review": True, "reviewer": reviewer},
+            details={"manual_review": True, "reviewer": reviewer, "request_missing": request_missing},
         ))
         await db.commit()
 

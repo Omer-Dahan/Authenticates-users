@@ -102,19 +102,35 @@ def format_ban_report(report: BanReport) -> str:
     return "\n".join(lines) if lines else "לא בוצעה פעולה באף קבוצה."
 
 
+PURGE_API_NOTE = (
+    "ℹ️ טלגרם לא מאפשר לבוט לראות את רשימת הבקשות הממתינות, ולא מעדכן אותו "
+    "כשבקשה מאושרת או נדחית באפליקציה או כשהמשתמש מבטל אותה. לכן השורות כאן הן "
+    "בקשות שהבוט ראה פעם, והמספר שמופיע באפליקציה הוא המספר האמיתי. "
+    "רק חשבונות מחוקים נדחים; כל השאר לא נוגעים בהם."
+)
+
+
 def format_purge_report(report: PurgeReport, applied: bool) -> str:
-    lines = [f"🔍 נבדקו: {report.checked} בקשות ממתינות"]
+    lines = [f"📦 בקשות פתוחות במסד הנתונים של הבוט: {report.checked}"]
     if report.deleted_found:
-        lines.append(f"🗑 נמצאו חשבונות מחוקים: {len(report.deleted_found)}")
+        lines.append(f"🗑 חשבונות מחוקים: {len(report.deleted_found)}")
         for title, uid, name in report.deleted_found[:20]:
-            name_display = esc(name) if name else uid
+            name_display = esc(name) if name else esc(str(uid))
             lines.append(f"  • {name_display} (<code>{uid}</code>) בקבוצה {esc(title)}")
     else:
         lines.append("🗑 לא נמצאו חשבונות מחוקים.")
     if applied:
-        lines.append(f"✅ הוסרו בפועל: {len(report.removed)}")
-    lines.append(f"✅ פעילים: {report.alive}")
-    lines.append(f"❓ לא ניתן לקבוע: {report.inconclusive}")
+        lines.append(f"✅ טלגרם עדיין הכיר את הבקשה, ונדחתה: {len(report.removed)}")
+        lines.append(f"👻 טלגרם כבר לא הכיר את הבקשה, נסגרה אצל הבוט: {len(report.request_gone)}")
+        lines.append(f"👥 כבר חברים בקבוצה, הבקשה נסגרה אצל הבוט: {len(report.already_member)}")
+        if report.decline_failed:
+            lines.append(f"⚠️ הדחייה נכשלה, השורה נשארה פתוחה: {len(report.decline_failed)}")
+    else:
+        if report.deleted_found:
+            lines.append("  רק בלחיצת האישור יתברר מול טלגרם אם הבקשות האלה עדיין קיימות.")
+        lines.append(f"👥 כבר חברים בקבוצה (טופלו מחוץ לבוט): {len(report.already_member)}")
+    lines.append(f"❔ החשבון קיים, לא ידוע אם הבקשה עדיין ממתינה: {report.alive}")
+    lines.append(f"❓ טלגרם לא החזיר מידע, לא ידוע אם הבקשה קיימת: {report.inconclusive}")
     if report.access_errors:
         lines.append("⚠️ בעיית גישה:")
         seen = set()
@@ -129,15 +145,22 @@ def format_purge_report(report: PurgeReport, applied: bool) -> str:
     if report.per_group:
         lines.append("")
         lines.append("📍 <b>פירוט לפי קבוצה:</b>")
-        for title, stats in report.per_group.items():
-            lines.append(f"\n<b>{esc(title)}</b>")
+        for key, stats in report.per_group.items():
+            lines.append(f"\n<b>{esc(stats.get('title', key))}</b>")
             lines.append(
                 f"  נבדקו: {stats['checked']} | מחוקים: {stats['deleted_found']} | "
-                f"פעילים: {stats['alive']} | לא ניתן לקבוע: {stats['inconclusive']}"
+                f"כבר חברים: {stats.get('already_member', 0)} | "
+                f"לא ידוע: {stats['alive'] + stats['inconclusive']}"
             )
+            if applied:
+                lines.append(
+                    f"  נדחו: {stats['removed']} | כבר לא בטלגרם: {stats.get('request_gone', 0)}"
+                )
             if stats.get("access_error"):
                 lines.append(f"  ⚠️ שגיאת גישה: {esc(stats['access_error'])}")
 
+    lines.append("")
+    lines.append(PURGE_API_NOTE)
     return "\n".join(lines)
 
 
@@ -389,15 +412,27 @@ async def cmd_purge_deleted(message: Message, bot: Bot) -> None:
             db=db,
         )
 
-    _store_pending_purge(message.from_user.id, target_group_id)
-
-    builder = InlineKeyboardBuilder()
-    builder.row(InlineKeyboardButton(text="🧹 בצע הסרה", callback_data="purge:apply"))
+    # Same rule as the per-group settings screen: no confirm button (and no
+    # pending record) when the dry run found nothing to act on.
+    can_apply = bool(report.deleted_found or report.already_member)
+    reply_markup = None
+    if can_apply:
+        _store_pending_purge(message.from_user.id, target_group_id)
+        builder = InlineKeyboardBuilder()
+        builder.row(InlineKeyboardButton(text="🧹 בצע הסרה", callback_data="purge:apply"))
+        reply_markup = builder.as_markup()
+        footer = "בדיקה בלבד, עדיין לא הוסר דבר. לחץ על <b>בצע הסרה</b> כדי לבצע."
+    else:
+        # A stale pending record from an earlier dry run must not survive a
+        # newer check that found nothing.
+        _PENDING_PURGES.pop(message.from_user.id, None)
+        footer = "אין מה להסיר."
 
     await message.reply(
-        f"🧹 <b>בדיקת בקשות ממתינות של חשבונות מחוקים</b>\n\n{format_purge_report(report, applied=False)}",
+        f"🧹 <b>בדיקת בקשות ממתינות של חשבונות מחוקים</b>\n\n"
+        f"{format_purge_report(report, applied=False)}\n\n{footer}",
         parse_mode="HTML",
-        reply_markup=builder.as_markup(),
+        reply_markup=reply_markup,
     )
 
 

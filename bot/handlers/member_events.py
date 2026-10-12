@@ -162,6 +162,37 @@ async def _catch_up_leave(db, group: Group, user_id: int, chat_id: int) -> None:
         ))
 
 
+async def _close_requests_resolved_outside(db, group: Group, user_id: int, chat_id: int) -> None:
+    now = datetime.now(timezone.utc)
+    jr_result = await db.execute(
+        select(JoinRequest).where(
+            JoinRequest.user_id == user_id,
+            JoinRequest.chat_id == chat_id,
+            JoinRequest.decision.in_((DecisionEnum.pending, DecisionEnum.manual_review)),
+            JoinRequest.resolved_at.is_(None),
+        )
+    )
+    for jr in jr_result.scalars().all():
+        jr.decision = DecisionEnum.approved
+        jr.resolved_at = now
+        jr.notes = "joined, request resolved outside the bot"
+        db.add(ModerationLog(
+            group_id=group.id, join_request_id=jr.id, user_id=user_id,
+            decision=DecisionEnum.approved, score=jr.score, matched_rules=jr.matched_rules,
+            details={"resolved_outside_bot": True, "note": "joined while the row was open"},
+        ))
+
+    session_result = await db.execute(
+        select(VerificationSession).where(
+            VerificationSession.user_id == user_id,
+            VerificationSession.chat_id == chat_id,
+            VerificationSession.completed_at.is_(None),
+        )
+    )
+    for session in session_result.scalars().all():
+        session.completed_at = now
+
+
 @router.chat_member()
 async def handle_chat_member_update(update: ChatMemberUpdated, bot: Bot) -> None:
     chat_id = update.chat.id
@@ -185,14 +216,20 @@ async def handle_chat_member_update(update: ChatMemberUpdated, bot: Bot) -> None
             event_at=event_at, during_outage=during_outage,
         ))
 
-        if not during_outage:
-            # Outside a detected outage, this is purely a record: the normal
-            # join-request / verification flow already owns any DM to the user.
-            await db.commit()
-            return
-
         joined = _is_joined(update.new_chat_member) and not _is_joined(update.old_chat_member)
         left = new_status in _LEFT_STATUSES
+
+        if not during_outage:
+            # Outside a detected outage, this is a record plus one reconciliation:
+            # an admin approving a request inside the Telegram app sends the bot
+            # no join-request update, only this join. A member cannot have a
+            # pending request, so any open row for them is closed here (database
+            # only). The normal join-request / verification flow still owns any
+            # DM to the user.
+            if joined:
+                await _close_requests_resolved_outside(db, group, user_id, chat_id)
+            await db.commit()
+            return
 
         if joined:
             await _catch_up_join(bot, db, group, user_id, chat_id, outage)

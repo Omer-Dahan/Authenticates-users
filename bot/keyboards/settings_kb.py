@@ -26,6 +26,9 @@ def main_settings_kb(group_id: int) -> InlineKeyboardMarkup:
         InlineKeyboardButton(text="🔔 התראות סקירה ידנית", callback_data=f"sm:notify:{g}"),
     )
     builder.row(
+        InlineKeyboardButton(text="🧹 ממתינים של חשבונות מחוקים", callback_data=f"sm:purge:{g}"),
+    )
+    builder.row(
         InlineKeyboardButton(text="🔄 ייבוא הגדרות", callback_data=f"sm:import:{g}"),
         InlineKeyboardButton(text="💾 קבע כברירת מחדל", callback_data=f"sm:set_default:{g}"),
     )
@@ -43,6 +46,17 @@ def security_mode_kb(group_id: int) -> InlineKeyboardMarkup:
         InlineKeyboardButton(text="🟡 קפדני", callback_data=f"sm:set_mode:{g}:strict"),
         InlineKeyboardButton(text="🔴 נעילה", callback_data=f"sm:set_mode:{g}:lockdown"),
     )
+    builder.row(InlineKeyboardButton(text="◀️ חזרה להגדרות", callback_data=f"sm:main:{g}"))
+    builder.row(InlineKeyboardButton(text="🏠 רשימת קבוצות", callback_data="start:refresh"))
+    return builder.as_markup()
+
+
+def purge_settings_kb(group_id: int, can_apply: bool) -> InlineKeyboardMarkup:
+    g = group_id
+    builder = InlineKeyboardBuilder()
+    if can_apply:
+        builder.row(InlineKeyboardButton(text="🧹 אישור הסרה", callback_data=f"sm:purge_apply:{g}"))
+    builder.row(InlineKeyboardButton(text="🔄 בדיקה מחדש", callback_data=f"sm:purge:{g}"))
     builder.row(InlineKeyboardButton(text="◀️ חזרה להגדרות", callback_data=f"sm:main:{g}"))
     builder.row(InlineKeyboardButton(text="🏠 רשימת קבוצות", callback_data="start:refresh"))
     return builder.as_markup()
