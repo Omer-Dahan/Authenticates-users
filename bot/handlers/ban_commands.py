@@ -267,15 +267,28 @@ def format_purge_report(report: PurgeReport, applied: bool) -> str:
     if applied:
         lines.append(f"✅ טלגרם עדיין הכיר את הבקשה, ונדחתה: {len(report.removed)}")
         lines.append(f"👻 טלגרם כבר לא הכיר את הבקשה, נסגרה אצל הבוט: {len(report.request_gone)}")
+        lines.append(f"🔨 הדחייה סורבה (חשבון מושבת), נוקה באמצעות חסימה: {len(report.removed_via_ban)}")
         lines.append(f"👥 כבר חברים בקבוצה, הבקשה נסגרה אצל הבוט: {len(report.already_member)}")
         if report.decline_failed:
             lines.append(f"⚠️ הדחייה נכשלה, השורה נשארה פתוחה: {len(report.decline_failed)}")
+        if report.race_lost_deleted:
+            lines.append(f"🏁 בקשת מחיקה הוכרעה על ידי החלטה אחרת בזמן הבדיקה: {len(report.race_lost_deleted)}")
+        if report.race_lost_already_member:
+            lines.append(
+                "🏁 בקשה שכבר הייתה חברות הוכרעה על ידי החלטה אחרת בזמן הבדיקה: "
+                f"{len(report.race_lost_already_member)}"
+            )
     else:
         if report.deleted_found:
             lines.append("  רק בלחיצת האישור יתברר מול טלגרם אם הבקשות האלה עדיין קיימות.")
         lines.append(f"👥 כבר חברים בקבוצה (טופלו מחוץ לבוט): {len(report.already_member)}")
     lines.append(f"❔ החשבון קיים, לא ידוע אם הבקשה עדיין ממתינה: {report.alive}")
     lines.append(f"❓ טלגרם לא החזיר מידע, לא ידוע אם הבקשה קיימת: {report.inconclusive}")
+    if report.unresolvable:
+        lines.append(
+            "🚫 טלגרם לא מכיר את המשתמש הזה בקבוצה הזו, הבוט לא יכול לפעול על הבקשה הזו, "
+            f"רק מי שנכנס לאפליקציה יכול לטפל בה: {len(report.unresolvable)}"
+        )
     if report.access_errors:
         lines.append("⚠️ בעיית גישה:")
         seen = set()
@@ -299,8 +312,15 @@ def format_purge_report(report: PurgeReport, applied: bool) -> str:
             )
             if applied:
                 lines.append(
-                    f"  נדחו: {stats['removed']} | כבר לא בטלגרם: {stats.get('request_gone', 0)}"
+                    f"  נדחו: {stats['removed']} | כבר לא בטלגרם: {stats.get('request_gone', 0)} | "
+                    f"נוקה באמצעות חסימה: {stats.get('removed_via_ban', 0)} | "
+                    f"דחייה נכשלה: {stats.get('decline_failed', 0)} | "
+                    f"הוכרע במקביל: {stats.get('race_lost_deleted', 0)}"
                 )
+                if stats.get("race_lost_already_member"):
+                    lines.append(f"  🏁 בקשת 'כבר חבר' הוכרעה במקביל: {stats['race_lost_already_member']}")
+            if stats.get("unresolvable"):
+                lines.append(f"  🚫 לא ניתן לאתר בטלגרם: {stats['unresolvable']}")
             if stats.get("access_error"):
                 lines.append(f"  ⚠️ שגיאת גישה: {esc(stats['access_error'])}")
 
@@ -315,6 +335,11 @@ def format_reconciliation_report(report: ReconciliationReport, applied: bool) ->
     if applied:
         lines.append(f"🗑 חשבונות מחוקים, הבקשה נדחתה: {len(report.deleted)}")
         lines.append(f"👻 חשבונות מחוקים, הבקשה כבר לא היתה בטלגרם: {len(report.deleted_request_gone)}")
+        lines.append(f"🔨 חשבונות מחוקים, הדחייה סורבה (חשבון מושבת), נוקה באמצעות חסימה: {len(report.deleted_via_ban)}")
+        if report.deleted_failed:
+            lines.append(f"⚠️ חשבונות מחוקים, הניקוי נכשל, השורה נשארה פתוחה: {len(report.deleted_failed)}")
+        if report.race_lost:
+            lines.append(f"🏁 בקשה הוכרעה על ידי החלטה אחרת בזמן הבדיקה: {len(report.race_lost)}")
     else:
         lines.append(f"🗑 חשבונות מחוקים שאותרו (יידחו רק באישור): {len(report.deleted)}")
     lines.append(f"🔨 חסומים או הוסרו מהקבוצה מחוץ לבוט: {len(report.banned)}")
@@ -322,7 +347,12 @@ def format_reconciliation_report(report: ReconciliationReport, applied: bool) ->
         lines.append(f"🕓 נסגרו אוטומטית בגלל גיל, מצבם לא ידוע: {len(report.auto_closed_stale)}")
     else:
         lines.append(f"🕓 יסגרו אוטומטית בגלל גיל (רק באישור), מצבם לא ידוע: {len(report.auto_closed_stale)}")
-    lines.append(f"❓ לא ניתן לקבוע את מצבם, נשארו פתוחים: {report.undetermined}")
+    lines.append(f"❓ לא הוכרע, נשאר פתוח: {report.undetermined}")
+    if report.unresolvable:
+        lines.append(
+            "🚫 טלגרם לא מכיר את המשתמש הזה בקבוצה הזו, הבוט לא יכול לפעול על הבקשה הזו, "
+            f"רק מי שנכנס לאפליקציה יכול לטפל בה: {len(report.unresolvable)}"
+        )
     if report.access_errors:
         lines.append("⚠️ בעיית גישה:")
         seen = set()
@@ -350,11 +380,21 @@ def format_reconciliation_report(report: ReconciliationReport, applied: bool) ->
                 f"  נבדקו: {stats['checked']} | הצטרפו: {stats['joined']} | "
                 f"מחוקים: {stats['deleted']} | חסומים: {stats['banned']}"
             )
+            if applied:
+                lines.append(
+                    f"  כבר לא בטלגרם: {stats.get('deleted_request_gone', 0)} | "
+                    f"נוקה באמצעות חסימה: {stats.get('deleted_via_ban', 0)} | "
+                    f"ניקוי נכשל: {stats.get('deleted_failed', 0)}"
+                )
             stale_label = "נסגרו אוטומטית (גיל)" if applied else "יסגרו אוטומטית (גיל)"
             lines.append(
                 f"  {stale_label}: {stats['auto_closed_stale']} | "
-                f"לא ידוע: {stats['undetermined']}"
+                f"לא הוכרע: {stats['undetermined']}"
             )
+            if stats.get("race_lost"):
+                lines.append(f"  🏁 הוכרע במקביל: {stats['race_lost']}")
+            if stats.get("unresolvable"):
+                lines.append(f"  🚫 לא ניתן לאתר בטלגרם: {stats['unresolvable']}")
             if stats.get("access_error"):
                 lines.append(f"  ⚠️ שגיאת גישה: {esc(stats['access_error'])}")
 

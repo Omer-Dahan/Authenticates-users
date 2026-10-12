@@ -34,8 +34,13 @@ class Settings(BaseSettings):
     recovery_grace_seconds: int = Field(default=30, env="RECOVERY_GRACE_SECONDS")
 
     # Join-request reconciliation sweep (bot's join_requests rows vs what
-    # Telegram can actually confirm - see moderation/actions.py)
-    reconciliation_stale_days: int = Field(default=7, env="RECONCILIATION_STALE_DAYS")
+    # Telegram can actually confirm - see moderation/actions.py). Default is
+    # 0 (disabled): a row the bot cannot prove is resolved (an "undetermined"
+    # outcome) might still be a genuine pending request the app still shows,
+    # and auto-closing it by age alone is exactly the silent-loss failure the
+    # owner reported. An admin who explicitly wants age-based auto-close for
+    # undetermined rows can still opt in by setting this above 0.
+    reconciliation_stale_days: int = Field(default=0, env="RECONCILIATION_STALE_DAYS")
     reconciliation_daily_sweep_enabled: bool = Field(default=True, env="RECONCILIATION_DAILY_SWEEP_ENABLED")
     reconciliation_daily_interval_seconds: int = Field(default=86400, env="RECONCILIATION_DAILY_INTERVAL_SECONDS")
 

@@ -9,14 +9,15 @@ from sqlalchemy import select
 from aiogram.exceptions import TelegramAPIError, TelegramRetryAfter
 from aiogram.types import ChatMemberBanned, ChatMemberLeft, ChatMemberMember, Message, User
 
-from database.models import DecisionEnum, Group, JoinRequest, ModerationLog, TelegramUser
-from moderation.actions import RECON_AUTO_CLOSE_NOTE, run_reconciliation_sweep
+from database.models import DecisionEnum, Group, JoinRequest, ModerationLog, TelegramUser, UserBan
+from moderation.actions import RECON_AUTO_CLOSE_NOTE, ReconciliationReport, run_reconciliation_sweep
 import bot.handlers.ban_commands as ban_commands_module
 from bot.handlers.ban_commands import (
     cb_reconcile_apply, cmd_reconcile, format_reconciliation_report,
 )
-from bot.handlers.settings_menu import cb_reconcile, cb_reconcile_apply_group
+from bot.handlers.settings_menu import cb_reconcile, cb_reconcile_apply_group, cb_reconcile_menu
 import recovery.reconciliation_loop
+from recovery.reconciliation_loop import _closed_count, run_daily_reconciliation
 from recovery.sweep import run_recovery_sweep
 from verification import VerificationEngine
 from tests.conftest import make_tg_user, make_tg_chat, make_callback_query, drain_purge_tasks
@@ -104,6 +105,216 @@ async def test_deactivated_account_is_closed_as_deleted(test_session_factory, sa
         row = await check_db.get(JoinRequest, jr.id)
         assert row.decision == DecisionEnum.rejected
         assert row.resolved_at is not None
+
+
+@pytest.mark.asyncio
+async def test_deactivated_account_whose_decline_is_refused_is_cleared_via_ban(
+    test_session_factory, sample_group, db_session, mock_bot
+):
+    """Reproduces the production failure: Telegram refuses decline with
+    "Forbidden: user is deactivated" even though the request is still
+    pending. The sweep must escalate to banChatMember and count the result
+    honestly, apart from a clean decline."""
+    jr = await _open_row(db_session, sample_group, 9048)
+    mock_bot.get_chat_member.return_value = _deleted_member()
+    mock_bot.decline_chat_join_request.side_effect = TelegramAPIError(
+        method="declineChatJoinRequest", message="Forbidden: user is deactivated"
+    )
+
+    report = await run_reconciliation_sweep(mock_bot, dry_run=False, db=db_session)
+
+    assert report.deleted == []
+    assert report.deleted_via_ban == [(sample_group.title, 9048)]
+    assert report.undetermined == 0
+    mock_bot.ban_chat_member.assert_called_once_with(sample_group.chat_id, 9048)
+    async with test_session_factory() as check_db:
+        row = await check_db.get(JoinRequest, jr.id)
+        assert row.decision == DecisionEnum.cleared_via_ban
+        assert row.resolved_at is not None
+
+        ban_row = (await check_db.execute(
+            select(UserBan).where(UserBan.telegram_id == 9048, UserBan.lifted_at.is_(None))
+        )).scalars().first()
+        assert ban_row is not None
+        assert ban_row.scope == "local"
+        assert ban_row.group_id == sample_group.id
+
+
+@pytest.mark.asyncio
+async def test_deactivated_account_whose_decline_is_refused_for_a_non_deactivation_reason_never_bans(
+    test_session_factory, sample_group, db_session, mock_bot
+):
+    """Finding D: a rights error, a network error, or any other failure that
+    is not the explicit "user is deactivated" refusal must never escalate to
+    a ban - the row stays open and is reported as a clearing failure, not
+    folded into the generic "undetermined" bucket."""
+    jr = await _open_row(db_session, sample_group, 9050)
+    mock_bot.get_chat_member.return_value = _deleted_member()
+    mock_bot.decline_chat_join_request.side_effect = TelegramAPIError(
+        method="declineChatJoinRequest", message="Bad Request: CHAT_ADMIN_REQUIRED"
+    )
+
+    report = await run_reconciliation_sweep(mock_bot, dry_run=False, db=db_session)
+
+    assert report.deleted_via_ban == []
+    assert report.undetermined == 0
+    assert len(report.deleted_failed) == 1
+    mock_bot.ban_chat_member.assert_not_called()
+    async with test_session_factory() as check_db:
+        row = await check_db.get(JoinRequest, jr.id)
+        assert row.decision == DecisionEnum.pending
+        assert row.resolved_at is None
+
+
+@pytest.mark.asyncio
+async def test_unresolvable_account_never_poisons_the_stale_rule_or_notifies_daily(
+    test_session_factory, sample_group, db_session, mock_bot, monkeypatch
+):
+    """Finding B: PARTICIPANT_ID_INVALID on both getChatMember and the
+    getChat fallback means Telegram has no record of this user in this chat
+    at all. It must be its own state, it must not disable the group's
+    stale-close rule, and it must not make the daily loop notify the owner
+    every single day forever just because this row exists."""
+    from config import settings
+    now = datetime.now(timezone.utc)
+    unresolvable_jr = await _open_row(db_session, sample_group, 9051, created_at=now - timedelta(days=10))
+    stale_jr = await _open_row(db_session, sample_group, 9052, created_at=now - timedelta(days=10))
+
+    async def fake_get_chat_member(chat_id, user_id):
+        if user_id == 9051:
+            raise TelegramAPIError(method="getChatMember", message="Bad Request: PARTICIPANT_ID_INVALID")
+        return _left_named(user_id)
+
+    mock_bot.get_chat_member.side_effect = fake_get_chat_member
+    mock_bot.get_chat.side_effect = TelegramAPIError(method="getChat", message="Bad Request: chat not found")
+
+    report = await run_reconciliation_sweep(mock_bot, dry_run=False, stale_days=7, db=db_session)
+
+    assert report.unresolvable == [(sample_group.title, 9051)]
+    assert report.stale_skipped_groups == []
+    assert [uid for _, uid in report.auto_closed_stale] == [9052]
+    async with test_session_factory() as check_db:
+        unresolvable_row = await check_db.get(JoinRequest, unresolvable_jr.id)
+        assert unresolvable_row.resolved_at is None
+        assert unresolvable_row.decision == DecisionEnum.pending
+
+        stale_row = await check_db.get(JoinRequest, stale_jr.id)
+        assert stale_row.decision == DecisionEnum.stale
+
+    # The daily loop must not notify the owner just because an unresolvable
+    # row exists: nothing closed, nothing to disclose via stale_skipped_groups.
+    monkeypatch.setattr(settings, "super_admin_id", 1)
+    only_unresolvable_jr = await _open_row(db_session, sample_group, 9053)
+    mock_bot.get_chat_member.side_effect = TelegramAPIError(
+        method="getChatMember", message="Bad Request: USER_ID_INVALID",
+    )
+    mock_bot.send_message.reset_mock()
+
+    await run_daily_reconciliation(mock_bot)
+
+    mock_bot.send_message.assert_not_called()
+
+
+def test_closed_count_includes_ban_cleared_rows():
+    """Finding A: the daily loop's own "did anything close" check used to
+    ignore deleted_via_ban entirely, so a run that only closed rows that way
+    stayed silent."""
+    report = ReconciliationReport(deleted_via_ban=[("G", 1), ("G", 2)])
+    assert _closed_count(report) == 2
+
+
+def test_reconciliation_report_totals_equal_the_sum_of_their_parts():
+    """Finding 5: the per-group "deleted" line used to silently absorb
+    deleted_request_gone (double-counting against the separate top-level
+    bucket), a clearing failure was folded into "undetermined" instead of
+    its own line, and a race-lost row vanished instead of getting a line of
+    its own. All four must now add up."""
+    stats = {
+        "title": "G", "checked": 4, "joined": 0, "deleted": 1,
+        "deleted_request_gone": 1, "deleted_via_ban": 1, "deleted_failed": 0,
+        "banned": 0, "auto_closed_stale": 0, "undetermined": 0,
+        "unresolvable": 0, "race_lost": 1, "access_error": None,
+    }
+    report = ReconciliationReport(
+        checked=4,
+        deleted=[("G", 1)],
+        deleted_request_gone=[("G", 2)],
+        deleted_via_ban=[("G", 3)],
+        race_lost=[("G", 4)],
+        per_group={1: stats},
+        member_counts={1: 100},
+    )
+    text = format_reconciliation_report(report, applied=True)
+
+    assert len(report.deleted) == 1
+    assert len(report.deleted_request_gone) == 1
+    assert "הוכרע במקביל: 1" in text
+    assert "ניקוי נכשל: 0" in text
+    assert "כבר לא בטלגרם: 1" in text
+
+
+def test_reconciliation_report_shows_ban_cleared_and_unresolvable_as_their_own_lines():
+    report = ReconciliationReport(
+        checked=5, deleted_via_ban=[("G", 1)], unresolvable=[("G", 2), ("G", 3)],
+    )
+    text = format_reconciliation_report(report, applied=True)
+
+    assert "נוקה באמצעות חסימה: 1" in text
+    assert "רק מי שנכנס לאפליקציה יכול לטפל בה: 2" in text
+    assert "לא הוכרע" in text
+    assert "—" not in text
+
+
+@pytest.mark.asyncio
+async def test_undetermined_row_is_never_auto_closed_by_age_with_the_default_config(
+    test_session_factory, sample_group, db_session, mock_bot
+):
+    """Finding C (policy change): the owner's answer for a week-old LIVE
+    applicant's request that Telegram still holds was to leave it alone -
+    keep the row open and report it as undetermined. The config default for
+    reconciliation_stale_days is 0, so calling the sweep without an explicit
+    override must never auto-close an old undetermined row."""
+    now = datetime.now(timezone.utc)
+    jr = await _open_row(db_session, sample_group, 9054, created_at=now - timedelta(days=365))
+    mock_bot.get_chat_member.return_value = _left_named(9054)
+
+    report = await run_reconciliation_sweep(mock_bot, dry_run=False, db=db_session)
+
+    assert report.auto_closed_stale == []
+    assert report.undetermined == 1
+    async with test_session_factory() as check_db:
+        row = await check_db.get(JoinRequest, jr.id)
+        assert row.resolved_at is None
+        assert row.decision == DecisionEnum.pending
+
+
+@pytest.mark.asyncio
+async def test_deactivated_account_stuck_when_both_decline_and_ban_fail(
+    test_session_factory, sample_group, db_session, mock_bot
+):
+    jr = await _open_row(db_session, sample_group, 9049, created_at=datetime.now(timezone.utc))
+    mock_bot.get_chat_member.return_value = _deleted_member()
+    mock_bot.decline_chat_join_request.side_effect = TelegramAPIError(
+        method="declineChatJoinRequest", message="Forbidden: user is deactivated"
+    )
+    mock_bot.ban_chat_member.side_effect = TelegramAPIError(
+        method="banChatMember", message="Forbidden: user is deactivated"
+    )
+
+    report = await run_reconciliation_sweep(mock_bot, dry_run=False, stale_days=7, db=db_session)
+
+    assert report.deleted == []
+    assert report.deleted_via_ban == []
+    assert report.undetermined == 0
+    assert len(report.deleted_failed) == 1
+    # A deleted account that could not be cleared poisons the stale rule for
+    # its own group too - it must never be allowed to age into a silent
+    # "auto_closed_stale" instead of staying visibly stuck.
+    assert sample_group.title in report.stale_skipped_groups
+    async with test_session_factory() as check_db:
+        row = await check_db.get(JoinRequest, jr.id)
+        assert row.decision == DecisionEnum.pending
+        assert row.resolved_at is None
 
 
 @pytest.mark.asyncio
@@ -217,6 +428,54 @@ async def test_stale_window_zero_disables_auto_close(test_session_factory, sampl
         row = await check_db.get(JoinRequest, old_jr.id)
         assert row.resolved_at is None
         assert row.decision == DecisionEnum.pending
+
+
+@pytest.mark.asyncio
+async def test_stale_window_zero_never_reports_stale_skipped_groups(
+    test_session_factory, sample_group, db_session, mock_bot, monkeypatch,
+):
+    """Finding 6: with the stale-close rule off (stale_days=0), a group with
+    a permanent probe error must never show up in stale_skipped_groups - that
+    field existing with the rule off is exactly what let the daily loop
+    notify the owner forever about a group it can never fix (see
+    recovery/reconciliation_loop.py's _closed_count gate)."""
+    from config import settings
+    monkeypatch.setattr(settings, "super_admin_id", 1)
+    jr = await _open_row(db_session, sample_group, 9060)
+    mock_bot.get_chat_member.side_effect = TelegramAPIError(
+        method="getChatMember", message="Forbidden: bot was kicked from the supergroup chat",
+    )
+    mock_bot.get_chat.side_effect = TelegramAPIError(method="getChat", message="Bad Request: network error")
+
+    report = await run_reconciliation_sweep(mock_bot, dry_run=False, stale_days=0, db=db_session)
+
+    assert report.stale_skipped_groups == []
+    async with test_session_factory() as check_db:
+        row = await check_db.get(JoinRequest, jr.id)
+        assert row.resolved_at is None
+
+    mock_bot.send_message.reset_mock()
+    await run_daily_reconciliation(mock_bot)
+    mock_bot.send_message.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_reconcile_menu_text_says_rule_is_off_instead_of_quoting_zero_days(
+    sample_group, db_session, monkeypatch,
+):
+    """Finding 6: with stale_days=0 the menu used to claim rows auto-close
+    "after 0 days have passed", which is false - the rule is off, and the
+    text must say so plainly instead."""
+    from config import settings
+    monkeypatch.setattr(settings, "reconciliation_stale_days", 0)
+    owner = make_tg_user(user_id=sample_group.owner_id, username="owner")
+
+    cb = make_callback_query(f"sm:reconcile_menu:{sample_group.id}", user=owner)
+    await cb_reconcile_menu(cb)
+
+    text = cb.message.edit_text.call_args.args[0]
+    assert "0 ימים" not in text
+    assert "כבויה" in text
 
 
 # ─── Dry run and idempotency ───────────────────────────────────────────────────

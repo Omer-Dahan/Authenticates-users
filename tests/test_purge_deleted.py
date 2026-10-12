@@ -70,10 +70,14 @@ async def test_purge_declines_and_closes_confirmed_deleted_account(
         assert logs[0].details.get("purge_deleted") is True
 
 
-# ─── 2. "member not found" is routine - leaves the row untouched, inconclusive
+# ─── 2. "member not found" means Telegram has no record of this user in this
+# chat at all - its own "unresolvable" state, not a generic inconclusive
+# probe error (review finding B): it must never disable the group's
+# age-based rules or look like a transient failure, because it never
+# resolves no matter how many times it is retried.
 
 @pytest.mark.asyncio
-async def test_purge_member_not_found_is_inconclusive_and_untouched(
+async def test_purge_member_not_found_is_unresolvable_and_untouched(
     test_session_factory, sample_group, db_session, mock_bot
 ):
     user_id = 8503461119
@@ -90,7 +94,8 @@ async def test_purge_member_not_found_is_inconclusive_and_untouched(
         mock_bot, dry_run=False, actor_id=999, actor_name="admin", db=db_session,
     )
 
-    assert report.inconclusive == 1
+    assert report.unresolvable == [(sample_group.title, user_id)]
+    assert report.inconclusive == 0
     assert report.deleted_found == []
     assert report.access_errors == []
     mock_bot.decline_chat_join_request.assert_not_called()

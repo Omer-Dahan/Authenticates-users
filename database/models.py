@@ -19,6 +19,14 @@ class DecisionEnum(str, enum.Enum):
     # tell" instead of being left open forever or misreported as approved or
     # rejected. See moderation/actions.py (run_reconciliation_sweep).
     stale = "stale"
+    # A deleted-account join request whose decline was refused by Telegram
+    # (an explicit "user is deactivated" restriction) and was cleared by
+    # banning the account directly instead. Distinct from "rejected" (a
+    # clean decline) and from "banned" (a rule-violation or manual ban) so
+    # every report and the settings stats can show this outcome as its own
+    # honest line instead of folding it into either bucket. See
+    # moderation/actions.py (clear_deleted_account_request).
+    cleared_via_ban = "cleared_via_ban"
 
 
 class SecurityModeEnum(str, enum.Enum):

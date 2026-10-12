@@ -205,9 +205,6 @@ deleted:
 
 ### Errors that are NOT evidence of deletion
 
-- `Bad Request: member not found` and `Bad Request: PARTICIPANT_ID_INVALID` -
-  routine for any pending requester, zero discriminating power. Never
-  inferred as deletion.
 - `Bad Request: chat not found` from the `getChatMember` call (where
   `chat_id` is the group) means the bot lost access to that **group**, not
   that the user is gone. Reported in `access_errors`; the row is never
@@ -217,6 +214,16 @@ deleted:
   never touched. Closing a live applicant's request by mistake is the worst
   possible outcome of this feature, so both of these short-circuit straight
   to "leave it alone" without even trying the `getChat` fallback.
+- `Bad Request: member not found`, `Bad Request: PARTICIPANT_ID_INVALID`, and
+  `Bad Request: USER_ID_INVALID`, when they come back from **both**
+  `getChatMember` and the `getChat` fallback, mean Telegram has no record of
+  this user in this chat at all - not an access problem, not proof of
+  deletion, and not a generic probe error either (measured live - see
+  docs/DELETED-REQUEST-REMOVAL.md). This is its own `unresolvable` outcome,
+  reported on its own line: the bot cannot act on it, only the Telegram app
+  can. Unlike a real probe error, it never disables the group's age-based
+  rules and never repeats itself in the daily owner notification just
+  because the row exists.
 
 ### What happens on apply
 
@@ -231,12 +238,27 @@ deleted:
     - `HIDE_REQUESTER_MISSING` → `request_gone` (Telegram no longer had it),
       row closed with `notes = "account deleted, request no longer on
       Telegram"`.
-    - Any other error (access, flood, network) → `decline_failed`, the row
-      stays **open**: nothing decisive came back, so the request may still
-      exist. Access errors are also listed in `access_errors`.
-  - `alive` and `inconclusive` rows are never touched.
+    - `Forbidden: user is deactivated`, and only that exact refusal, escalates
+      to `banChatMember(chat_id, user_id)` instead of giving up: Telegram
+      sometimes refuses to let a bot decline a deactivated account's request
+      even though the request is genuinely still pending, but banning the
+      same account still works (measured live, on accounts already kicked -
+      see docs/DELETED-REQUEST-REMOVAL.md for exactly what was and was not
+      observed). Success closes the row as `removed_via_ban`
+      (`decision = DecisionEnum.cleared_via_ban`) and records the ban the same
+      way every other ban access path does (`UserBan`, scope `local`, scoped
+      to this one group), so `/unban` can find it. Failure stays
+      `decline_failed`, the row left open.
+    - Any other error (a rights error under a different string, flood,
+      network, an exhausted 429, `USER_ID_INVALID`, ...) → `decline_failed`,
+      the row stays **open**: nothing decisive came back, so the request may
+      still exist, and the bare empty-profile heuristic alone is never
+      enough to justify a ban. Access errors are also listed in
+      `access_errors`.
+  - `alive`, `inconclusive`, and `unresolvable` rows are never touched.
 
-  Closing a deleted candidate's row sets `decision = DecisionEnum.rejected`,
+  Closing a deleted candidate's row (other than via the ban escalation,
+  which uses `cleared_via_ban`) sets `decision = DecisionEnum.rejected`,
   `resolved_at = now`, closes the user's open `VerificationSession` rows for
   that chat, and adds a `ModerationLog` with `details={"purge_deleted": True,
   "evidence": "empty first_name", "decline_error": ...}`.
@@ -249,10 +271,12 @@ deleted:
 | 🗑 חשבונות מחוקים | `deleted_found` |
 | ✅ טלגרם עדיין הכיר את הבקשה, ונדחתה | `removed` (apply only) |
 | 👻 טלגרם כבר לא הכיר את הבקשה, נסגרה אצל הבוט | `request_gone` (apply only) |
+| 🔨 הדחייה סורבה (חשבון מושבת), נוקה באמצעות חסימה | `removed_via_ban` (apply only) |
 | 👥 כבר חברים בקבוצה | `already_member` |
 | ⚠️ הדחייה נכשלה, השורה נשארה פתוחה | `decline_failed` (apply only) |
 | ❔ החשבון קיים, לא ידוע אם הבקשה עדיין ממתינה | `alive` |
 | ❓ טלגרם לא החזיר מידע, לא ידוע אם הבקשה קיימת | `inconclusive` |
+| 🚫 טלגרם לא מכיר את המשתמש הזה בקבוצה הזו | `unresolvable` |
 
 Every report ends with a note that the bot cannot see Telegram's list and
 that the number in the app is the real one. The terminal script prints the
@@ -304,3 +328,108 @@ authorization independently.
    Calls `init_db()` first (same reason as `scripts/ban_user.py`: the tables
    are created by the bot at startup), defaults to a dry run, and only
    mutates anything with `--apply`.
+
+## Reconciliation sweep
+
+`moderation/actions.py::run_reconciliation_sweep()` walks every open
+`join_requests` row and closes exactly what a fresh `getChatMember` probe can
+prove: the user is now a member (`joined`), the account is deleted
+(`deleted` / `deleted_request_gone` / `deleted_via_ban`, same three outcomes
+and the same ban-escalation rule as the purge above), or the user was
+kicked/removed outside the bot (`banned`). Returns a `ReconciliationReport`
+(`checked`, `joined`, `deleted`, `deleted_request_gone`, `deleted_via_ban`,
+`deleted_failed`, `banned`, `auto_closed_stale`, `unresolvable`,
+`undetermined`, `race_lost`, `access_errors`, `stale_skipped_groups`,
+`per_group`, `member_counts`, `stopped_early`).
+
+### No auto-close by age, by default
+
+A row the sweep cannot prove either way (`undetermined`) stays **open** by
+default and is reported as its own line ("לא הוכרע"), plus its count in the
+per-group breakdown. This is a deliberate policy, not an oversight: the owner
+was asked what to do with a week-old LIVE applicant whose request Telegram
+still held, and the answer was to leave it alone, not close it by age. A row
+the bot cannot prove is resolved might still be a real pending request the
+app is still showing; silently closing it on age alone is exactly the
+failure the owner reported in the first place.
+
+`reconciliation_stale_days` (`config/settings.py`) still exists and the
+sweep still honours it when it is greater than 0 - an admin who explicitly
+wants undetermined rows older than N days closed as `DecisionEnum.stale`
+(`notes` says plainly that this is neither an approval nor a rejection) can
+still opt into that. The **config default is 0** (disabled), and
+`run_reconciliation_sweep` only applies the rule when the row's age is
+positively known, the probe gave a genuine non-error answer, and no other
+row in the same group hit a probe error this run (see below).
+
+### The `unresolvable` state
+
+`member not found`, `PARTICIPANT_ID_INVALID`, and `USER_ID_INVALID`, when
+they come back from **both** `getChatMember` and the `getChat` fallback,
+mean Telegram has no record of this user in this chat at all. This used to
+be folded into a generic probe error, which had two consequences in
+practice: it disabled the group's stale-close rule for every other row in
+that group, forever (the row never resolves no matter how many times it is
+retried), and it made the daily loop notify the owner every single day,
+forever, for a group that will never close on its own. `unresolvable` is now
+its own outcome: reported on its own line, left open, and explicitly
+excluded both from the stale-rule poisoning below and from the daily loop's
+"did anything close" check - it never triggers a notification by itself.
+
+### A probe error still poisons the stale rule for its own group
+
+Unrelated to `unresolvable`: a genuine probe failure (an access error, a
+network error, an exhausted 429, or a deleted account that neither decline
+nor the ban fallback could clear) still poisons the age-based auto-close
+rule for every other row in the *same group* for *that run* - one network
+blip or one stuck row must never mass-close every other aged row in that
+group as if it had been positively resolved. Reported in
+`stale_skipped_groups`.
+
+### Recording a ban escalation
+
+When the ban escalation (see the purge section above) clears a row, either
+here or in the purge sweep or in `verification/cleanup.py`'s timeout path,
+`moderation/actions.py::record_deleted_account_ban()` records it the same
+way every other ban access path does: an active `UserBan` row, scope
+`local`, scoped to the one group where the request existed, so `/unban` can
+find it and a future admin can see what happened instead of a
+`banChatMember` call that leaves no trace anywhere but Telegram's own side.
+Idempotent like every other ban upsert in this module: an existing active
+local-scope row for that exact `(telegram_id, group_id)` pair is updated in
+place, never duplicated.
+
+### Entry points
+
+Same dry-run-then-confirm pattern as the purge above: `/reconcile` in
+`bot/handlers/ban_commands.py` (super-admin, every group), the per-group
+settings screen (`sm:reconcile:<group_id>` / `sm:reconcile_apply:<group_id>`
+in `bot/handlers/settings_menu.py`), and the daily background loop
+(`recovery/reconciliation_loop.py::run_daily_reconciliation`, guarded so two
+sweeps can never run at once in this process, and notifying the owner only
+when a sweep actually closed something or has something to disclose via
+`stale_skipped_groups`). `stale_skipped_groups` is only ever populated when
+`reconciliation_stale_days` is above its config default of 0 (see "No
+auto-close by age, by default" above) - with the default, a group stuck
+entirely behind `deleted_failed` or `race_lost` rows closes nothing and
+reports no `stale_skipped_groups` either, so the daily loop stays silent
+about it. Such a group is visible only through a manual `/reconcile` report,
+never through the daily owner notification.
+
+## Known limitation: `verification/cleanup.py` is not race-safe the way the purge and reconciliation sweep are
+
+`clear_deleted_account_request`/`decline_expired_request`'s ban escalation
+can succeed on Telegram and then still lose the local write: the purge
+(`moderation/actions.py::purge_deleted_requests`) and the reconciliation
+sweep (`run_reconciliation_sweep`) both close their `JoinRequest` row with
+`_close_row`, a conditional `UPDATE ... WHERE resolved_at IS NULL`, and
+report (never silently drop) a row that lost that race. `verification/cleanup.py`
+predates that pattern and still closes its row with a plain attribute
+assignment (`join_req.resolved_at = now`), with the `UserBan` write, the
+`JoinRequest` write, and the `ModerationLog` write all committed together in
+one `db.commit()` at the end of the loop. If a later row in the same batch
+raises before that commit, the whole transaction rolls back - including the
+ban record for a user this exact loop already banned on Telegram moments
+earlier, leaving a Telegram ban with no corresponding `UserBan` row. This is
+a pre-existing gap, not something introduced by the deleted-account-clearing
+work above, and is left as-is here rather than fixed as a side effect of it.

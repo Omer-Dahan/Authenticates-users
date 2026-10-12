@@ -50,7 +50,7 @@ async def _group_reconcile_enabled(group_id: int, db) -> bool:
 def _closed_count(report) -> int:
     return (
         len(report.joined) + len(report.deleted) + len(report.deleted_request_gone)
-        + len(report.banned) + len(report.auto_closed_stale)
+        + len(report.deleted_via_ban) + len(report.banned) + len(report.auto_closed_stale)
     )
 
 
@@ -88,9 +88,14 @@ async def run_daily_reconciliation(bot: Bot) -> None:
                 continue
 
             # Stay silent only when the sweep both closed nothing AND has
-            # nothing to disclose - a group stuck behind a permanently
-            # failing probe must still reach the owner even if it closed
-            # zero rows this run, or it can hide behind this check forever.
+            # nothing to disclose via stale_skipped_groups. That second
+            # condition only ever fires when reconciliation_stale_days > 0
+            # (see run_reconciliation_sweep): with the config default of 0,
+            # a group stuck entirely behind deleted_failed/race_lost rows
+            # closes nothing and reports no stale_skipped_groups either, so
+            # this check does NOT notify the owner for it - it stays silent
+            # in this daily loop and is visible only through a manual
+            # /reconcile report.
             if _closed_count(report) == 0 and not report.stale_skipped_groups:
                 continue
 

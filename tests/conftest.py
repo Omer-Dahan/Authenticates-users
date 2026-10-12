@@ -1,3 +1,20 @@
+import os
+import tempfile
+
+# Pins DATABASE_URL to a throwaway path BEFORE any app module is imported
+# below. config/settings.py reads this env var the moment it is first
+# imported (directly or transitively), and database/session.py creates its
+# module-level engine against settings.database_url at that same import
+# time - before the test_session_factory fixture below ever runs, and
+# regardless of whether a given module is in that fixture's monkeypatch
+# list. Without this, the default (a relative "./data/moderation.db") means
+# any test that reaches an unpatched module writes to the real production
+# database - which is exactly what happened once already (590 open rows
+# lost to a real "stale" close during this work).
+os.environ["DATABASE_URL"] = (
+    f"sqlite+aiosqlite:///{tempfile.mkdtemp(prefix='auth_bot_test_db_')}/conftest_default.db"
+)
+
 import pytest
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock
@@ -69,6 +86,18 @@ async def test_session_factory(tmp_path, monkeypatch):
 async def db_session(test_session_factory):
     async with test_session_factory() as session:
         yield session
+
+
+@pytest.fixture(autouse=True)
+def _clear_cleanup_retry_state():
+    # Each test gets a fresh database whose autoincrement ids restart from 1,
+    # but verification.cleanup's clearing-backoff map (keyed by
+    # VerificationSession.id) is process-global - without clearing it between
+    # tests, a session id reused by an unrelated later test would inherit a
+    # stale backoff from a previous test and be wrongly skipped.
+    verification.cleanup._CLEAR_RETRY_STATE.clear()
+    yield
+    verification.cleanup._CLEAR_RETRY_STATE.clear()
 
 
 @pytest.fixture

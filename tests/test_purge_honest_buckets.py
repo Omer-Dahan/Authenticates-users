@@ -9,7 +9,7 @@ from sqlalchemy import select
 from aiogram.exceptions import TelegramAPIError
 from aiogram.types import Message, User, ChatMemberLeft, ChatMemberMember, ChatMemberUpdated
 
-from database.models import DecisionEnum, Group, JoinRequest, TelegramUser, VerificationSession
+from database.models import DecisionEnum, Group, JoinRequest, TelegramUser, UserBan, VerificationSession
 from moderation.actions import purge_deleted_requests, PurgeReport
 import bot.handlers.ban_commands as ban_commands_module
 import bot.handlers.member_events as member_events
@@ -98,19 +98,117 @@ async def test_deleted_account_whose_request_telegram_no_longer_has_is_counted_a
 
 
 @pytest.mark.asyncio
-async def test_deleted_account_with_indecisive_decline_error_keeps_row_open(
+async def test_deleted_account_whose_decline_is_refused_is_cleared_via_ban_fallback(
     test_session_factory, sample_group, db_session, mock_bot
 ):
+    """Reproduces the production failure: Telegram refuses declineChatJoinRequest
+    with "Forbidden: user is deactivated" even though the request is still
+    sitting in the group's pending list. The sweep must escalate to
+    banChatMember and, if that succeeds, actually clear the request from
+    Telegram instead of quietly leaving it there."""
     jr = await _open_row(db_session, sample_group, 7003)
     mock_bot.get_chat_member.return_value = _deleted_member()
     mock_bot.decline_chat_join_request.side_effect = TelegramAPIError(
-        method="declineChatJoinRequest", message="Too Many Requests: retry after 5"
+        method="declineChatJoinRequest", message="Forbidden: user is deactivated"
     )
 
     report = await purge_deleted_requests(mock_bot, dry_run=False, db=db_session)
 
     assert report.removed == []
     assert report.request_gone == []
+    assert report.decline_failed == []
+    assert report.removed_via_ban == [(sample_group.title, 7003)]
+    mock_bot.ban_chat_member.assert_called_once_with(sample_group.chat_id, 7003)
+    async with test_session_factory() as check_db:
+        row = await check_db.get(JoinRequest, jr.id)
+        assert row.decision == DecisionEnum.cleared_via_ban
+        assert row.resolved_at is not None
+
+        # The ban must be recorded the same way every other ban access path
+        # records one, so /unban can find it and a future admin can see what
+        # happened.
+        ban_row = (await check_db.execute(
+            select(UserBan).where(UserBan.telegram_id == 7003, UserBan.lifted_at.is_(None))
+        )).scalars().first()
+        assert ban_row is not None
+        assert ban_row.scope == "local"
+        assert ban_row.group_id == sample_group.id
+
+
+@pytest.mark.asyncio
+async def test_deleted_account_whose_decline_is_refused_for_a_non_deactivation_reason_never_bans(
+    test_session_factory, sample_group, db_session, mock_bot
+):
+    """Finding D: only an explicit "user is deactivated" refusal justifies
+    the ban fallback. A rights error under a different string must leave the
+    row open and reported as a failure, never trigger a ban."""
+    jr = await _open_row(db_session, sample_group, 7007)
+    mock_bot.get_chat_member.return_value = _deleted_member()
+    mock_bot.decline_chat_join_request.side_effect = TelegramAPIError(
+        method="declineChatJoinRequest", message="Bad Request: CHAT_ADMIN_REQUIRED"
+    )
+
+    report = await purge_deleted_requests(mock_bot, dry_run=False, db=db_session)
+
+    assert report.removed_via_ban == []
+    assert len(report.decline_failed) == 1
+    mock_bot.ban_chat_member.assert_not_called()
+    async with test_session_factory() as check_db:
+        row = await check_db.get(JoinRequest, jr.id)
+        assert row.decision == DecisionEnum.pending
+        assert row.resolved_at is None
+
+
+@pytest.mark.asyncio
+async def test_unresolvable_account_is_its_own_state_and_stays_open(
+    test_session_factory, sample_group, db_session, mock_bot
+):
+    """Finding B: PARTICIPANT_ID_INVALID/USER_ID_INVALID/"member not found"
+    on both getChatMember and the getChat fallback means Telegram has no
+    record of this user in this chat at all - not an access problem, not
+    proof of deletion, and not a generic probe error either."""
+    jr = await _open_row(db_session, sample_group, 7008)
+    mock_bot.get_chat_member.side_effect = TelegramAPIError(
+        method="getChatMember", message="Bad Request: PARTICIPANT_ID_INVALID"
+    )
+    mock_bot.get_chat.side_effect = TelegramAPIError(
+        method="getChat", message="Bad Request: chat not found"
+    )
+
+    report = await purge_deleted_requests(mock_bot, dry_run=False, db=db_session)
+
+    assert report.unresolvable == [(sample_group.title, 7008)]
+    assert report.inconclusive == 0
+    assert report.alive == 0
+    mock_bot.decline_chat_join_request.assert_not_called()
+    mock_bot.ban_chat_member.assert_not_called()
+    async with test_session_factory() as check_db:
+        row = await check_db.get(JoinRequest, jr.id)
+        assert row.decision == DecisionEnum.pending
+        assert row.resolved_at is None
+
+
+@pytest.mark.asyncio
+async def test_deleted_account_stuck_when_both_decline_and_ban_fail_keeps_row_open(
+    test_session_factory, sample_group, db_session, mock_bot
+):
+    """When even the ban fallback is refused, the bot genuinely cannot clear
+    the request - the row must stay open, not get closed as if it had
+    succeeded."""
+    jr = await _open_row(db_session, sample_group, 7005)
+    mock_bot.get_chat_member.return_value = _deleted_member()
+    mock_bot.decline_chat_join_request.side_effect = TelegramAPIError(
+        method="declineChatJoinRequest", message="Forbidden: user is deactivated"
+    )
+    mock_bot.ban_chat_member.side_effect = TelegramAPIError(
+        method="banChatMember", message="Forbidden: user is deactivated"
+    )
+
+    report = await purge_deleted_requests(mock_bot, dry_run=False, db=db_session)
+
+    assert report.removed == []
+    assert report.request_gone == []
+    assert report.removed_via_ban == []
     assert len(report.decline_failed) == 1
     async with test_session_factory() as check_db:
         row = await check_db.get(JoinRequest, jr.id)
@@ -177,11 +275,93 @@ def test_report_wording_separates_bot_rows_from_what_telegram_knows():
     assert "\u2014" not in text
 
 
+def test_report_totals_equal_the_sum_of_their_parts():
+    """Finding 5: every displayed total must equal the sum of the lines
+    shown under it, both at the top level and in the per-group breakdown -
+    including rows whose close lost a race, which must get their own line
+    instead of silently inflating deleted_found."""
+    stats = {
+        "title": "G", "checked": 5, "deleted_found": 4, "removed": 1,
+        "request_gone": 1, "removed_via_ban": 1, "decline_failed": 0,
+        "race_lost_deleted": 1, "race_lost_already_member": 0, "already_member": 0,
+        "unresolvable": 0, "alive": 0, "inconclusive": 1, "access_error": None,
+    }
+    report = PurgeReport(
+        checked=5,
+        deleted_found=[("G", 1, None), ("G", 2, None), ("G", 3, None), ("G", 4, None)],
+        removed=[("G", 1)],
+        request_gone=[("G", 2)],
+        removed_via_ban=[("G", 3)],
+        race_lost_deleted=[("G", 4)],
+        inconclusive=1,
+        per_group={1: stats},
+    )
+    text = format_purge_report(report, applied=True)
+
+    assert len(report.deleted_found) == (
+        len(report.removed) + len(report.request_gone) + len(report.removed_via_ban)
+        + len(report.decline_failed) + len(report.race_lost_deleted)
+    )
+    assert "הוכרע במקביל: 1" in text
+    assert f"דחייה נכשלה: {stats['decline_failed']}" in text
+
+
+def test_report_race_lost_already_member_never_inflates_deleted_found():
+    """Finding (purge race_lost mixing two row types): a race-lost row can
+    come from the already_member path (never counted in deleted_found) or
+    from the deleted path (counted in deleted_found). Mixing the two into one
+    bucket broke the invariant that deleted_found equals the sum of its own
+    breakdown. Trigger from the review: checked=1, deleted_found=0,
+    one already_member row that lost its race - that single row must never
+    be attributed to the deleted_found breakdown, at either level."""
+    stats = {
+        "title": "G", "checked": 1, "deleted_found": 0, "removed": 0,
+        "request_gone": 0, "removed_via_ban": 0, "decline_failed": 0,
+        "race_lost_deleted": 0, "race_lost_already_member": 1, "already_member": 0,
+        "unresolvable": 0, "alive": 0, "inconclusive": 0, "access_error": None,
+    }
+    report = PurgeReport(
+        checked=1,
+        race_lost_already_member=[("G", 4)],
+        per_group={1: stats},
+    )
+    text = format_purge_report(report, applied=True)
+
+    assert len(report.deleted_found) == (
+        len(report.removed) + len(report.request_gone) + len(report.removed_via_ban)
+        + len(report.decline_failed) + len(report.race_lost_deleted)
+    )
+    assert len(report.deleted_found) == 0
+    assert len(report.race_lost_already_member) == 1
+    assert "בקשה שכבר הייתה חברות הוכרעה על ידי החלטה אחרת בזמן הבדיקה: 1" in text
+    assert "בקשת 'כבר חבר' הוכרעה במקביל: 1" in text
+
+
 def test_report_escapes_the_uid_of_a_nameless_deleted_row():
     report = PurgeReport(checked=1, deleted_found=[("G", 7777, None)])
     text = format_purge_report(report, applied=False)
 
     assert "  • 7777 (<code>7777</code>) בקבוצה G" in text
+
+
+def test_report_shows_ban_cleared_and_unresolvable_as_their_own_lines():
+    """Finding A: a report whose parts cannot add up to its own total is
+    exactly the inconsistency the owner complained about. removed_via_ban
+    and unresolvable must each get their own labelled line, not disappear."""
+    report = PurgeReport(
+        checked=10,
+        deleted_found=[("G", 1, None), ("G", 2, None)],
+        removed=[],
+        request_gone=[],
+        removed_via_ban=[("G", 1), ("G", 2)],
+        unresolvable=[("G", 3)],
+    )
+    text = format_purge_report(report, applied=True)
+
+    assert "נוקה באמצעות חסימה: 2" in text
+    assert "טלגרם לא מכיר את המשתמש הזה בקבוצה הזו" in text
+    assert "רק מי שנכנס לאפליקציה יכול לטפל בה: 1" in text
+    assert "—" not in text
 
 
 # ─── /purge_deleted command ───────────────────────────────────────────────────

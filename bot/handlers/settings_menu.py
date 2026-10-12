@@ -370,12 +370,20 @@ async def cb_reconcile_menu(callback: CallbackQuery) -> None:
         daily_enabled = await _group_reconcile_enabled(group_id, db)
 
     status = "🔔 פעילה" if daily_enabled else "🔕 כבויה"
+    if settings.reconciliation_stale_days > 0:
+        stale_rule_text = (
+            f"בקשה שלא ניתן לקבוע את מצבה נשארת פתוחה, ונסגרת אוטומטית כ\"לא ידוע\" "
+            f"רק אם חלפו {settings.reconciliation_stale_days} ימים ועדיין לא ניתן לקבוע."
+        )
+    else:
+        stale_rule_text = (
+            "בקשה שלא ניתן לקבוע את מצבה נשארת פתוחה. הסגירה האוטומטית לפי גיל כבויה כרגע."
+        )
     await callback.message.edit_text(
         f"🔁 <b>התאמה מול טלגרם: {esc(group.title)}</b>\n\n"
         f"הבדיקה הזו עוברת על בקשות הצטרפות פתוחות שהבוט מחזיק ובודקת מול טלגרם "
         f"מה אפשר להוכיח: המשתמש הצטרף, החשבון נמחק, או שהוא הוסר מהקבוצה. "
-        f"בקשה שלא ניתן לקבוע את מצבה נשארת פתוחה, ונסגרת אוטומטית כ\"לא ידוע\" "
-        f"רק אם חלפו {settings.reconciliation_stale_days} ימים ועדיין לא ניתן לקבוע.\n\n"
+        f"{stale_rule_text}\n\n"
         f"בדיקה יומית אוטומטית: {status}",
         parse_mode="HTML",
         reply_markup=reconcile_menu_kb(group_id, daily_enabled),
@@ -535,6 +543,7 @@ async def cb_stats(callback: CallbackQuery) -> None:
         f"✅ אושרו: {counts[DecisionEnum.approved]}\n"
         f"❌ נדחו: {counts[DecisionEnum.rejected]}\n"
         f"🔨 חסומים: {counts[DecisionEnum.banned]}\n"
+        f"🔓 חשבון מחוק, נוקה באמצעות חסימה: {counts[DecisionEnum.cleared_via_ban]}\n"
         f"👀 סקירה ידנית: {counts[DecisionEnum.manual_review]}\n"
         f"⏳ ממתינים: {counts[DecisionEnum.pending]}\n"
         f"🕓 נסגרו אוטומטית (גיל, לא ידוע): {counts[DecisionEnum.stale]}\n"

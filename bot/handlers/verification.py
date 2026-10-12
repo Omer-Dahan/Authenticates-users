@@ -12,6 +12,7 @@ from database.models import (
     VerificationSession,
 )
 from moderation import ModerationEngine
+from moderation.actions import is_request_missing_error
 from verification import VerificationEngine
 from tracking import send_decision
 from logs import get_logger
@@ -81,8 +82,18 @@ async def handle_verification_answer(message: Message, bot: Bot) -> None:
             await message.reply("⏰ תוקף האימות פג. שלח בקשת הצטרפות חדשה.")
             try:
                 await bot.decline_chat_join_request(chat_id, user_id)
-            except TelegramAPIError:
-                pass
+            except TelegramAPIError as e:
+                if not is_request_missing_error(str(e)):
+                    # The sender just typed a message, so this is a live
+                    # account by definition - never banned, but a refused
+                    # decline must not be treated as if Telegram cleared the
+                    # request. Leave the row open for a later retry.
+                    logger.warning(
+                        "Failed to decline join request on Telegram, leaving the row open",
+                        user_id=user_id, chat_id=chat_id, error=str(e),
+                    )
+                    await db.commit()
+                    return
             join_req.decision = DecisionEnum.rejected
             join_req.resolved_at = datetime.now(timezone.utc)
             await db.commit()

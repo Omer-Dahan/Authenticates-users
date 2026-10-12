@@ -13,7 +13,7 @@ from database.models import (
     TelegramUser, UserBan,
 )
 from moderation import ModerationEngine
-from moderation.actions import ban_user, unban_user
+from moderation.actions import ban_user, record_deleted_account_ban, unban_user
 from bot.handlers.settings_menu import cb_manual_review
 from bot.handlers.ban_commands import cb_ban_scope, cb_ban_lift, cmd_ban, cmd_unban
 from tests.conftest import make_tg_user, make_tg_chat, make_callback_query
@@ -200,6 +200,153 @@ async def test_unban_lifts_row_and_calls_unban_chat_member(sample_group, db_sess
         select(UserBan).where(UserBan.telegram_id == user_id)
     )).scalars().first()
     assert ban_row.lifted_at is not None
+
+
+# ─── 5b. record_deleted_account_ban: idempotent, scoped, and liftable ─────────
+
+@pytest.mark.asyncio
+async def test_record_deleted_account_ban_is_idempotent_and_unbannable(sample_group, db_session, mock_bot):
+    """A ban issued by the deleted-account clearing path must be recorded
+    like any other ban (so /unban can find it), must never duplicate when
+    the same action records it again, and must actually be lifted by
+    unban_user."""
+    user_id = 66010
+
+    await record_deleted_account_ban(db_session, sample_group.id, user_id, "first reason", "בוט (בדיקה)")
+    await db_session.commit()
+    await record_deleted_account_ban(db_session, sample_group.id, user_id, "second reason", "בוט (בדיקה שוב)")
+    await db_session.commit()
+
+    rows = (await db_session.execute(
+        select(UserBan).where(UserBan.telegram_id == user_id)
+    )).scalars().all()
+    assert len(rows) == 1
+    assert rows[0].reason == "second reason"
+    assert rows[0].banned_by_name == "בוט (בדיקה שוב)"
+    assert rows[0].scope == "local"
+    assert rows[0].group_id == sample_group.id
+
+    report = await unban_user(mock_bot, user_id, actor_id=999, actor_name="admin", db=db_session)
+    assert sample_group.title in report.banned_in
+    mock_bot.unban_chat_member.assert_called_once()
+
+    await db_session.refresh(rows[0])
+    assert rows[0].lifted_at is not None
+
+
+@pytest.mark.asyncio
+async def test_record_deleted_account_ban_never_overwrites_an_unrelated_scope(
+    sample_group, db_session,
+):
+    """Finding: _find_active_ban_row used to match by group_id alone, so this
+    path could find and overwrite an admin's own manual global_remove ban
+    record for the same group - replacing their reason while leaving
+    banned_by pointing at them. The lookup must be scoped the same way this
+    feature writes (scope="local"), so it can only ever touch its own row."""
+    user_id = 66011
+    manual_ban = UserBan(
+        telegram_id=user_id, scope="global_remove", group_id=sample_group.id,
+        reason="spam", banned_by=999, banned_by_name="admin",
+    )
+    db_session.add(manual_ban)
+    await db_session.commit()
+
+    await record_deleted_account_ban(db_session, sample_group.id, user_id, "account deleted", "בוט (בדיקה)")
+    await db_session.commit()
+
+    rows = (await db_session.execute(
+        select(UserBan).where(UserBan.telegram_id == user_id, UserBan.lifted_at.is_(None))
+    )).scalars().all()
+    assert len(rows) == 2
+    manual_row = next(r for r in rows if r.scope == "global_remove")
+    local_row = next(r for r in rows if r.scope == "local")
+    assert manual_row.reason == "spam"
+    assert manual_row.banned_by == 999
+    assert local_row.reason == "account deleted"
+    assert local_row.banned_by is None
+
+
+@pytest.mark.asyncio
+async def test_record_deleted_account_ban_never_overwrites_an_admins_local_ban(
+    sample_group, db_session,
+):
+    """Finding 1: an admin's own manual scope="local" ban for this exact
+    group has the identical shape (scope="local" + group_id) as this
+    feature's own bot-issued row, so matching on scope and group_id alone is
+    not enough to tell them apart. The lookup must identify this feature's
+    own row unambiguously (banned_by IS NULL), so it can never find, and
+    overwrite, an admin's local ban even when the admin's active local ban
+    for this group was never actually enforced on Telegram (their ban call
+    failed, or they lifted it in the app) and the user goes on to delete
+    their account and get cleared by this path."""
+    user_id = 66012
+    admin_ban = UserBan(
+        telegram_id=user_id, scope="local", group_id=sample_group.id,
+        reason="spam", banned_by=999, banned_by_name="admin",
+    )
+    db_session.add(admin_ban)
+    await db_session.commit()
+
+    await record_deleted_account_ban(db_session, sample_group.id, user_id, "account deleted", "בוט (בדיקה)")
+    await db_session.commit()
+
+    rows = (await db_session.execute(
+        select(UserBan).where(UserBan.telegram_id == user_id, UserBan.lifted_at.is_(None))
+    )).scalars().all()
+    assert len(rows) == 2
+    admin_row = next(r for r in rows if r.banned_by == 999)
+    bot_row = next(r for r in rows if r.banned_by is None)
+    assert admin_row.reason == "spam"
+    assert admin_row.banned_by_name == "admin"
+    assert bot_row.reason == "account deleted"
+    assert bot_row.scope == "local"
+    assert bot_row.group_id == sample_group.id
+
+
+@pytest.mark.asyncio
+async def test_ban_user_escalation_updates_local_row_in_place(
+    sample_group, second_group, db_session, mock_bot,
+):
+    """Finding 2: escalating an existing local ban to global_remove for the
+    same group used to create a second active row instead of updating the
+    existing one in place, because the lookup matched on the NEW scope
+    rather than on the group this ban actually targets. A stale duplicate
+    left behind this way means /unban <ban_id> only lifts one of the two
+    rows, leaving the other looking active in the database even though the
+    user is no longer banned on Telegram."""
+    user_id = 66013
+    await ban_user(
+        mock_bot, user_id, "local",
+        group_id=sample_group.id, reason="first", actor_id=999, actor_name="admin", db=db_session,
+    )
+
+    rows_before = (await db_session.execute(
+        select(UserBan).where(UserBan.telegram_id == user_id, UserBan.lifted_at.is_(None))
+    )).scalars().all()
+    assert len(rows_before) == 1
+    original_id = rows_before[0].id
+
+    await ban_user(
+        mock_bot, user_id, "global_remove",
+        group_id=sample_group.id, reason="escalated", actor_id=999, actor_name="admin", db=db_session,
+    )
+
+    rows_after = (await db_session.execute(
+        select(UserBan).where(UserBan.telegram_id == user_id, UserBan.lifted_at.is_(None))
+    )).scalars().all()
+    assert len(rows_after) == 1
+    assert rows_after[0].id == original_id
+    assert rows_after[0].scope == "global_remove"
+    assert rows_after[0].reason == "escalated"
+
+    report = await unban_user(mock_bot, user_id, ban_id=original_id, actor_id=999, actor_name="admin", db=db_session)
+    assert sample_group.title in report.banned_in
+    assert second_group.title in report.banned_in
+
+    remaining = (await db_session.execute(
+        select(UserBan).where(UserBan.telegram_id == user_id, UserBan.lifted_at.is_(None))
+    )).scalars().all()
+    assert remaining == []
 
 
 # ─── 6. Authorization: a non-owner, non-super-admin pressing rev:ban ──────────
