@@ -18,6 +18,7 @@ import verification.cleanup
 import recovery.state
 import recovery.heartbeat
 import recovery.sweep
+import recovery.reconciliation_loop
 from database.models import Group, GroupConfig
 from moderation import ModerationEngine
 from verification import VerificationEngine
@@ -56,6 +57,7 @@ async def test_session_factory(tmp_path, monkeypatch):
     monkeypatch.setattr(verification.cleanup, "AsyncSessionLocal", session_factory)
     monkeypatch.setattr(recovery.heartbeat, "AsyncSessionLocal", session_factory)
     monkeypatch.setattr(recovery.sweep, "AsyncSessionLocal", session_factory)
+    monkeypatch.setattr(recovery.reconciliation_loop, "AsyncSessionLocal", session_factory)
     monkeypatch.setattr(settings, "tracking_channel_id", None)
     
     yield session_factory
