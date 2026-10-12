@@ -19,7 +19,10 @@ from bot.keyboards.settings_kb import (
     purge_settings_kb,
 )
 from bot.handlers.admin_utils import register_group_admin, mark_settings_edited
-from bot.handlers.ban_commands import format_purge_report, _store_pending_purge, _pop_pending_purge
+from bot.handlers.ban_commands import (
+    format_purge_report, _store_pending_purge, _pop_pending_purge,
+    safe_answer, start_purge_task, purge_in_progress, _PURGE_PROGRESS_INTERVAL,
+)
 from bot.text import esc
 from moderation.actions import ban_user, BanReport, purge_deleted_requests, is_request_missing_error
 from config import settings
@@ -244,33 +247,50 @@ async def cb_purge_menu(callback: CallbackQuery, bot: Bot) -> None:
             await callback.answer("אין לך גישה לקבוצה זו.", show_alert=True)
             return
 
+    if purge_in_progress(callback.from_user.id):
+        await safe_answer(callback, "בדיקה אחרת עדיין רצה. ההודעה שלה תתעדכן בסיום.", show_alert=True)
+        return
+
+    # Answer before any probing: the query expires long before a sweep ends.
+    await safe_answer(callback, "הבדיקה התחילה. ההודעה תתעדכן בסיום.")
+
+    admin_id = callback.from_user.id
+    actor_name = callback.from_user.username or str(callback.from_user.id)
+    header = f"🧹 <b>חשבונות מחוקים בבקשות ממתינות: {esc(group.title)}</b>"
+
+    async def sweep(progress):
         # First press: a dry run scoped to this group only. Nothing is declined
         # and no row is closed until the confirm button below is pressed.
-        report = await purge_deleted_requests(
-            bot, group_id=group.id, dry_run=True,
-            actor_id=callback.from_user.id,
-            actor_name=callback.from_user.username or str(callback.from_user.id),
-            db=db,
+        async with AsyncSessionLocal() as db:
+            report = await purge_deleted_requests(
+                bot, group_id=group.id, dry_run=True,
+                actor_id=admin_id, actor_name=actor_name, db=db,
+                progress=progress, progress_interval=_PURGE_PROGRESS_INTERVAL,
+            )
+
+        can_apply = bool(report.deleted_found or report.already_member)
+        if can_apply:
+            _store_pending_purge(admin_id, group.id)
+        else:
+            # A stale pending record from an earlier dry run must not survive
+            # a newer check that found nothing, same rule as /purge_deleted
+            # and the super-admin panel.
+            _pop_pending_purge(admin_id)
+
+        footer = (
+            "לחץ על <b>אישור הסרה</b> כדי לדחות את בקשות החשבונות המחוקים ולסגור "
+            "את השורות של מי שכבר חבר בקבוצה."
+            if can_apply else "אין מה להסיר בקבוצה זו."
         )
+        text = (
+            f"{header}\n"
+            f"בדיקה בלבד, עדיין לא הוסר דבר.\n\n"
+            f"{format_purge_report(report, applied=False)}\n\n"
+            f"{footer}"
+        )
+        return text, purge_settings_kb(group.id, can_apply)
 
-    can_apply = bool(report.deleted_found or report.already_member)
-    if can_apply:
-        _store_pending_purge(callback.from_user.id, group.id)
-
-    footer = (
-        "לחץ על <b>אישור הסרה</b> כדי לדחות את בקשות החשבונות המחוקים ולסגור "
-        "את השורות של מי שכבר חבר בקבוצה."
-        if can_apply else "אין מה להסיר בקבוצה זו."
-    )
-    await callback.message.edit_text(
-        f"🧹 <b>חשבונות מחוקים בבקשות ממתינות: {esc(group.title)}</b>\n"
-        f"בדיקה בלבד, עדיין לא הוסר דבר.\n\n"
-        f"{format_purge_report(report, applied=False)}\n\n"
-        f"{footer}",
-        parse_mode="HTML",
-        reply_markup=purge_settings_kb(group.id, can_apply),
-    )
-    await callback.answer()
+    start_purge_task(callback.message, admin_id, header, sweep, bot, failure_markup=back_to_main_kb(group.id))
 
 
 @router.callback_query(F.data.startswith("sm:purge_apply:"))
@@ -283,29 +303,37 @@ async def cb_purge_apply_group(callback: CallbackQuery, bot: Bot) -> None:
             await callback.answer("אין לך גישה לקבוצה זו.", show_alert=True)
             return
 
-        # The confirm acts only on the dry run this admin was shown for this
-        # exact group, and only once: the record is consumed here.
-        pending = _pop_pending_purge(callback.from_user.id)
-        if pending is None or pending["group_id"] != group.id:
-            await callback.answer("הבדיקה פגה או שכבר בוצעה. יש להריץ את הבדיקה מחדש.", show_alert=True)
-            return
+    if purge_in_progress(callback.from_user.id):
+        await safe_answer(callback, "בדיקה אחרת עדיין רצה. ההודעה שלה תתעדכן בסיום.", show_alert=True)
+        return
 
-        report = await purge_deleted_requests(
-            bot, group_id=pending["group_id"], dry_run=False,
-            actor_id=callback.from_user.id,
-            actor_name=callback.from_user.username or str(callback.from_user.id),
-            db=db,
-        )
+    # The confirm acts only on the dry run this admin was shown for this
+    # exact group, and only once: the record is consumed here.
+    pending = _pop_pending_purge(callback.from_user.id)
+    if pending is None or pending["group_id"] != group.id:
+        await safe_answer(callback, "הבדיקה פגה או שכבר בוצעה. יש להריץ את הבדיקה מחדש.", show_alert=True)
+        return
 
-    await callback.answer("בוצע.")
-    try:
-        await callback.message.edit_text(
-            f"🧹 <b>הסרה בוצעה: {esc(group.title)}</b>\n\n{format_purge_report(report, applied=True)}",
-            parse_mode="HTML",
-            reply_markup=back_to_main_kb(group.id),
-        )
-    except TelegramAPIError:
-        pass
+    # Answer before any probing: the query expires long before a sweep ends.
+    await safe_answer(callback, "ההסרה התחילה. ההודעה תתעדכן בסיום.")
+
+    admin_id = callback.from_user.id
+    actor_name = callback.from_user.username or str(callback.from_user.id)
+
+    async def sweep(progress):
+        async with AsyncSessionLocal() as db:
+            report = await purge_deleted_requests(
+                bot, group_id=pending["group_id"], dry_run=False,
+                actor_id=admin_id, actor_name=actor_name, db=db,
+                progress=progress, progress_interval=_PURGE_PROGRESS_INTERVAL,
+            )
+        text = f"🧹 <b>הסרה בוצעה: {esc(group.title)}</b>\n\n{format_purge_report(report, applied=True)}"
+        return text, back_to_main_kb(group.id)
+
+    start_purge_task(
+        callback.message, admin_id, f"🧹 <b>הסרת בקשות של חשבונות מחוקים: {esc(group.title)}</b>",
+        sweep, bot, failure_markup=back_to_main_kb(group.id),
+    )
 
 
 # ─── Statistics ───────────────────────────────────────────────────────────────

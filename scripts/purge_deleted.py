@@ -49,9 +49,13 @@ async def _run(args: argparse.Namespace) -> int:
                         return 1
                     group_id = group.id
 
+                async def progress(done: int, total: int) -> None:
+                    print(f"⏳ נבדקו {done} מתוך {total} בקשות...", flush=True)
+
                 report = await purge_deleted_requests(
                     bot, group_id=group_id, dry_run=not args.apply,
                     actor_id=args.actor, actor_name="cli", db=db,
+                    progress=progress, progress_interval=2.0,
                 )
                 print(format_report(report, applied=args.apply))
                 return 0

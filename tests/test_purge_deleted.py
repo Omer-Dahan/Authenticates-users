@@ -11,7 +11,7 @@ from database.models import DecisionEnum, JoinRequest, ModerationLog, TelegramUs
 from moderation.actions import purge_deleted_requests, PurgeReport
 import bot.handlers.ban_commands as ban_commands_module
 from bot.handlers.ban_commands import cb_purge_apply, format_purge_report
-from tests.conftest import make_tg_user, make_callback_query
+from tests.conftest import make_tg_user, make_callback_query, drain_purge_tasks
 
 
 def _deleted_member() -> ChatMemberMember:
@@ -189,6 +189,35 @@ async def test_purge_command_first_press_is_dry_run_only(
 
 
 @pytest.mark.asyncio
+async def test_purge_command_global_dry_run_emits_scoped_apply_all_button(
+    test_session_factory, sample_group, db_session, mock_bot, monkeypatch
+):
+    """The command's global path (no chat_id argument) was untested: this
+    pins its button down to the scoped `purge:apply:all` token, not the old
+    unscoped `purge:apply`."""
+    from config import settings
+    admin = make_tg_user(user_id=987654321, first_name="Admin", username="adminuser")
+    monkeypatch.setattr(settings, "super_admin_id", admin.id)
+
+    user_id = 8503461126
+    await _make_pending_request(db_session, sample_group, user_id)
+    mock_bot.get_chat_member.return_value = _deleted_member()
+
+    message = AsyncMock(spec=Message)
+    message.text = "/purge_deleted"
+    message.from_user = admin
+    message.reply = AsyncMock()
+
+    await ban_commands_module.cmd_purge_deleted(message, mock_bot)
+
+    _args, kwargs = message.reply.call_args
+    markup = kwargs["reply_markup"]
+    callback_datas = [b.callback_data for row in markup.inline_keyboard for b in row]
+    assert callback_datas == ["purge:apply:all"]
+    assert ban_commands_module._PENDING_PURGES[admin.id]["group_id"] is None
+
+
+@pytest.mark.asyncio
 async def test_purge_apply_callback_refuses_non_super_admin(
     test_session_factory, sample_group, db_session, mock_bot, monkeypatch
 ):
@@ -241,12 +270,13 @@ async def test_purge_apply_second_press_is_refused(
 
     await ban_commands_module.cmd_purge_deleted(message, mock_bot)
 
-    callback = make_callback_query("purge:apply", user=admin)
+    callback = make_callback_query("purge:apply:all", user=admin)
     await cb_purge_apply(callback, mock_bot)
+    await drain_purge_tasks()
 
     assert mock_bot.decline_chat_join_request.call_count == 1
 
-    second_callback = make_callback_query("purge:apply", user=admin)
+    second_callback = make_callback_query("purge:apply:all", user=admin)
     await cb_purge_apply(second_callback, mock_bot)
 
     assert mock_bot.decline_chat_join_request.call_count == 1

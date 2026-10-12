@@ -3,13 +3,14 @@
 The actual ban/unban logic lives in moderation/actions.py and is shared with
 the manual-review button, the super-admin panel, and the terminal script.
 """
+import asyncio
 from datetime import datetime, timedelta, timezone
-from typing import Optional
+from typing import Awaitable, Callable, Optional
 
 from aiogram import Router, Bot, F
 from aiogram.exceptions import TelegramAPIError
 from aiogram.filters import Command
-from aiogram.types import Message, CallbackQuery, InlineKeyboardButton
+from aiogram.types import Message, CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from sqlalchemy import select
 
@@ -82,6 +83,123 @@ def _pop_pending_purge(admin_id: int) -> Optional[dict]:
     if datetime.now(timezone.utc) - entry["created_at"] > _PENDING_PURGE_TTL:
         return None
     return entry
+
+
+# A purge sweep probes every open row and can outlive a callback query by far,
+# so it never runs inline in a callback handler: the handler answers at once
+# and the sweep runs as a task that edits the message as it goes. Tasks are
+# kept referenced here so they are not garbage collected mid-run.
+_PURGE_TASKS: set[asyncio.Task] = set()
+_PURGE_RUNNING: set[int] = set()   # admin ids with a sweep in flight
+_PURGE_PROGRESS_INTERVAL = 3.0     # seconds between progress edits
+
+PurgeSweep = Callable[[Callable[[int, int], Awaitable[None]]], Awaitable[tuple[str, Optional[InlineKeyboardMarkup]]]]
+
+
+async def safe_answer(callback: CallbackQuery, text: Optional[str] = None, show_alert: bool = False) -> None:
+    """Answers a callback query without ever raising: an expired query must not
+    kill the handler before it gets to show the admin anything."""
+    try:
+        if text is None:
+            await callback.answer()
+        elif show_alert:
+            await callback.answer(text, show_alert=True)
+        else:
+            await callback.answer(text)
+    except TelegramAPIError as e:
+        logger.warning(f"callback answer failed ({callback.data}): {e}")
+
+
+async def _safe_edit(message: Message, text: str, reply_markup: Optional[InlineKeyboardMarkup] = None) -> bool:
+    """Never raises: besides TelegramAPIError (deleted message, 429, ...), the
+    message handed in may be an InaccessibleMessage (no edit_text method at
+    all) or even None (callback.message can genuinely be None), which would
+    otherwise surface as an AttributeError and escape the background task."""
+    try:
+        await message.edit_text(text, parse_mode="HTML", reply_markup=reply_markup)
+        return True
+    except Exception as e:
+        logger.warning(f"purge message edit failed: {e}")
+        return False
+
+
+async def _safe_edit_or_send(message: Message, text: str, reply_markup: Optional[InlineKeyboardMarkup] = None) -> bool:
+    """Edits the message in place; if that fails (deleted message, inaccessible
+    message, network error, a 429 on the edit), sends a new message instead so
+    the admin is never left without feedback. Returns whether the admin was
+    reached either way, so the caller can fall back further if not."""
+    if await _safe_edit(message, text, reply_markup=reply_markup):
+        return True
+    try:
+        await message.answer(text, parse_mode="HTML", reply_markup=reply_markup)
+        return True
+    except Exception as e:
+        logger.error(f"purge fallback message send failed: {e}")
+        return False
+
+
+def purge_in_progress(admin_id: int) -> bool:
+    return admin_id in _PURGE_RUNNING
+
+
+def start_purge_task(
+    message: Message,
+    admin_id: int,
+    header: str,
+    sweep: PurgeSweep,
+    bot: Bot,
+    failure_markup: Optional[InlineKeyboardMarkup] = None,
+) -> asyncio.Task:
+    """Runs `sweep` in the background. The message always ends with either the
+    sweep's report or an explicit failure line, never with silence - including
+    when the original message itself cannot be reached at all."""
+    _PURGE_RUNNING.add(admin_id)
+
+    async def _tell_admin(text: str, reply_markup: Optional[InlineKeyboardMarkup] = None) -> None:
+        """Last resort: if the original message is gone, inaccessible, or was
+        None to begin with, send the admin a fresh private message directly
+        instead of leaving them with no answer at all."""
+        if message is not None and await _safe_edit_or_send(message, text, reply_markup=reply_markup):
+            return
+        try:
+            await bot.send_message(admin_id, text, parse_mode="HTML", reply_markup=reply_markup)
+        except Exception:
+            logger.exception("purge: could not reach admin at all")
+
+    async def runner() -> None:
+        try:
+            await _safe_edit(message, f"{header}\n\n⏳ הבדיקה התחילה. ההודעה תתעדכן בסיום.")
+
+            async def progress(done: int, total: int) -> None:
+                await _safe_edit(message, f"{header}\n\n⏳ נבדקו {done} מתוך {total} בקשות...")
+
+            try:
+                text, markup = await sweep(progress)
+            except Exception:
+                logger.exception("purge sweep failed")
+                await _tell_admin(
+                    f"{header}\n\n❌ הבדיקה נכשלה באמצע. ייתכן שחלק מהשורות כבר טופלו. "
+                    f"אפשר להריץ אותה שוב, היא בטוחה להרצה חוזרת.",
+                    reply_markup=failure_markup,
+                )
+                return
+
+            await _tell_admin(text, reply_markup=markup)
+        except Exception:
+            # Catches anything _safe_edit/_tell_admin themselves did not
+            # already absorb, so the task can never die silently.
+            logger.exception("purge: background task failed outside the sweep")
+            await _tell_admin(
+                f"{header}\n\n❌ הבדיקה נכשלה באופן בלתי צפוי. אפשר להריץ אותה שוב.",
+                reply_markup=failure_markup,
+            )
+        finally:
+            _PURGE_RUNNING.discard(admin_id)
+
+    task = asyncio.create_task(runner())
+    _PURGE_TASKS.add(task)
+    task.add_done_callback(_PURGE_TASKS.discard)
+    return task
 
 
 def _is_super_admin(user_id: int) -> bool:
@@ -405,12 +523,20 @@ async def cmd_purge_deleted(message: Message, bot: Bot) -> None:
                 return
             target_group_id = group.id
 
-        report = await purge_deleted_requests(
-            bot, group_id=target_group_id, dry_run=True,
-            actor_id=message.from_user.id,
-            actor_name=message.from_user.username or str(message.from_user.id),
-            db=db,
-        )
+        # A message handler has no answer deadline, but a failed sweep must
+        # still end with a reply rather than a dead update.
+        try:
+            report = await purge_deleted_requests(
+                bot, group_id=target_group_id, dry_run=True,
+                actor_id=message.from_user.id,
+                actor_name=message.from_user.username or str(message.from_user.id),
+                db=db,
+            )
+        except Exception:
+            logger.exception("purge_deleted dry run failed")
+            _PENDING_PURGES.pop(message.from_user.id, None)
+            await message.reply("❌ הבדיקה נכשלה באמצע. אפשר להריץ /purge_deleted שוב.")
+            return
 
     # Same rule as the per-group settings screen: no confirm button (and no
     # pending record) when the dry run found nothing to act on.
@@ -418,8 +544,12 @@ async def cmd_purge_deleted(message: Message, bot: Bot) -> None:
     reply_markup = None
     if can_apply:
         _store_pending_purge(message.from_user.id, target_group_id)
+        # The scope travels with the button (group id, or "all" for a global
+        # sweep) so cb_purge_apply can refuse a button whose scope does not
+        # match whatever dry run is currently pending for this admin.
+        scope_token = "all" if target_group_id is None else str(target_group_id)
         builder = InlineKeyboardBuilder()
-        builder.row(InlineKeyboardButton(text="🧹 בצע הסרה", callback_data="purge:apply"))
+        builder.row(InlineKeyboardButton(text="🧹 בצע הסרה", callback_data=f"purge:apply:{scope_token}"))
         reply_markup = builder.as_markup()
         footer = "בדיקה בלבד, עדיין לא הוסר דבר. לחץ על <b>בצע הסרה</b> כדי לבצע."
     else:
@@ -436,30 +566,61 @@ async def cmd_purge_deleted(message: Message, bot: Bot) -> None:
     )
 
 
-@router.callback_query(F.data == "purge:apply")
+@router.callback_query(F.data.startswith("purge:apply"))
 async def cb_purge_apply(callback: CallbackQuery, bot: Bot) -> None:
     if not _is_super_admin(callback.from_user.id):
-        await callback.answer("⛔ אין הרשאה.", show_alert=True)
+        await safe_answer(callback, "⛔ אין הרשאה.", show_alert=True)
         return
 
+    if purge_in_progress(callback.from_user.id):
+        await safe_answer(callback, "בדיקה אחרת עדיין רצה. ההודעה שלה תתעדכן בסיום.", show_alert=True)
+        return
+
+    # The scope travels with the button: a bare legacy "purge:apply" (an old
+    # message from before this check existed) carries no scope at all and is
+    # refused outright rather than trusted against whatever happens to be
+    # pending for this admin right now.
+    parts = callback.data.split(":")
+    if len(parts) != 3:
+        await safe_answer(callback, "הכפתור הזה ישן. יש להריץ /purge_deleted מחדש.", show_alert=True)
+        return
+    scope_token = parts[2]
+    if scope_token == "all":
+        button_group_id = None
+    else:
+        try:
+            button_group_id = int(scope_token)
+        except ValueError:
+            await safe_answer(callback, "כפתור לא תקין.", show_alert=True)
+            return
+
+    # One-shot: the record is consumed here regardless of outcome, so a stale
+    # or mismatched button can never be retried against a newer dry run.
     pending = _pop_pending_purge(callback.from_user.id)
     if pending is None:
-        await callback.answer("הבדיקה פגה או שכבר בוצעה. יש להריץ /purge_deleted מחדש.", show_alert=True)
+        await safe_answer(callback, "הבדיקה פגה או שכבר בוצעה. יש להריץ /purge_deleted מחדש.", show_alert=True)
+        return
+    if pending["group_id"] != button_group_id:
+        await safe_answer(
+            callback,
+            "הכפתור הזה שייך לבדיקה אחרת מזו שמוצגת כרגע. יש להריץ בדיקה חדשה וללחוץ על הכפתור שלה.",
+            show_alert=True,
+        )
         return
 
-    async with AsyncSessionLocal() as db:
-        report = await purge_deleted_requests(
-            bot, group_id=pending["group_id"], dry_run=False,
-            actor_id=callback.from_user.id,
-            actor_name=callback.from_user.username or str(callback.from_user.id),
-            db=db,
-        )
+    # Answer before any probing: the query expires long before a sweep ends.
+    await safe_answer(callback, "ההסרה התחילה. ההודעה תתעדכן בסיום.")
 
-    await callback.answer("בוצע.")
-    try:
-        await callback.message.edit_text(
-            f"🧹 <b>הסרה בוצעה</b>\n\n{format_purge_report(report, applied=True)}",
-            parse_mode="HTML",
-        )
-    except TelegramAPIError:
-        pass
+    actor_id = callback.from_user.id
+    actor_name = callback.from_user.username or str(callback.from_user.id)
+
+    async def sweep(progress):
+        async with AsyncSessionLocal() as db:
+            report = await purge_deleted_requests(
+                bot, group_id=pending["group_id"], dry_run=False,
+                actor_id=actor_id, actor_name=actor_name, db=db,
+                progress=progress, progress_interval=_PURGE_PROGRESS_INTERVAL,
+            )
+        return f"🧹 <b>הסרה בוצעה</b>\n\n{format_purge_report(report, applied=True)}", None
+
+    start_purge_task(callback.message, actor_id, "🧹 <b>הסרת בקשות של חשבונות מחוקים</b>", sweep, bot)

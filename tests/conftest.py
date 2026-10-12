@@ -104,6 +104,13 @@ async def sample_group(db_session):
     return group
 
 
+async def drain_purge_tasks():
+    """Waits for every background purge sweep the handlers started."""
+    import asyncio
+    while bot.handlers.ban_commands._PURGE_TASKS:
+        await asyncio.gather(*list(bot.handlers.ban_commands._PURGE_TASKS))
+
+
 def make_tg_user(user_id=111222, first_name="Test", last_name="User", username="testuser"):
     return User(
         id=user_id,
@@ -146,6 +153,7 @@ def make_callback_query(data: str, user=None, chat=None):
     msg.chat = chat
     msg.text = "Settings menu"
     msg.edit_text = AsyncMock()
+    msg.answer = AsyncMock()
 
     cb = AsyncMock(spec=CallbackQuery)
     cb.data = data

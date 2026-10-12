@@ -9,7 +9,10 @@ from sqlalchemy import select, func
 from database.session import AsyncSessionLocal
 from database.models import Group, JoinRequest, DecisionEnum, ModerationLog, UserBan
 from bot.keyboards.settings_kb import ban_scope_picker_kb, bans_list_kb
-from bot.handlers.ban_commands import format_purge_report, _store_pending_purge
+from bot.handlers.ban_commands import (
+    format_purge_report, _store_pending_purge, _pop_pending_purge,
+    safe_answer, start_purge_task, purge_in_progress, _PURGE_PROGRESS_INTERVAL,
+)
 from bot.text import esc
 from moderation.actions import purge_deleted_requests
 from config import settings
@@ -341,26 +344,46 @@ async def cb_purge_prompt(callback: CallbackQuery, bot: Bot) -> None:
         await callback.answer()
         return
 
-    async with AsyncSessionLocal() as db:
-        report = await purge_deleted_requests(
-            bot, dry_run=True,
-            actor_id=callback.from_user.id,
-            actor_name=callback.from_user.username or str(callback.from_user.id),
-            db=db,
-        )
+    if purge_in_progress(callback.from_user.id):
+        await safe_answer(callback, "בדיקה אחרת עדיין רצה. ההודעה שלה תתעדכן בסיום.", show_alert=True)
+        return
 
-    _store_pending_purge(callback.from_user.id, None)
+    # Answer before any probing: the query expires long before a sweep ends.
+    await safe_answer(callback, "הבדיקה התחילה. ההודעה תתעדכן בסיום.")
 
-    builder = InlineKeyboardBuilder()
-    builder.row(InlineKeyboardButton(text="🧹 בצע הסרה", callback_data="purge:apply"))
-    builder.row(InlineKeyboardButton(text="◀️ חזרה", callback_data="sa:main"))
+    admin_id = callback.from_user.id
+    actor_name = callback.from_user.username or str(callback.from_user.id)
+    header = "🧹 <b>בקשות ממתינות של חשבונות מחוקים</b>"
 
-    await callback.message.edit_text(
-        f"🧹 <b>בקשות ממתינות של חשבונות מחוקים</b>\n\n{format_purge_report(report, applied=False)}",
-        parse_mode="HTML",
-        reply_markup=builder.as_markup(),
-    )
-    await callback.answer()
+    back = InlineKeyboardBuilder()
+    back.row(InlineKeyboardButton(text="◀️ חזרה", callback_data="sa:main"))
+
+    async def sweep(progress):
+        async with AsyncSessionLocal() as db:
+            report = await purge_deleted_requests(
+                bot, dry_run=True,
+                actor_id=admin_id, actor_name=actor_name, db=db,
+                progress=progress, progress_interval=_PURGE_PROGRESS_INTERVAL,
+            )
+
+        # Same rule as /purge_deleted and the per-group settings screen: no
+        # confirm button, and no pending record, when the dry run found
+        # nothing to act on.
+        can_apply = bool(report.deleted_found or report.already_member)
+        builder = InlineKeyboardBuilder()
+        if can_apply:
+            _store_pending_purge(admin_id, None)
+            builder.row(InlineKeyboardButton(text="🧹 בצע הסרה", callback_data="purge:apply:all"))
+        else:
+            # A stale pending record from an earlier dry run must not survive
+            # a newer check that found nothing.
+            _pop_pending_purge(admin_id)
+        builder.row(InlineKeyboardButton(text="◀️ חזרה", callback_data="sa:main"))
+
+        footer = "" if can_apply else "\n\nאין מה להסיר."
+        return f"{header}\n\n{format_purge_report(report, applied=False)}{footer}", builder.as_markup()
+
+    start_purge_task(callback.message, admin_id, header, sweep, bot, failure_markup=back.as_markup())
 
 
 # ─── Search user ──────────────────────────────────────────────────────────────

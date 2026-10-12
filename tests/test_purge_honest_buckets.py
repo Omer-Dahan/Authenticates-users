@@ -16,7 +16,7 @@ import bot.handlers.member_events as member_events
 from bot.handlers.ban_commands import cb_purge_apply, cmd_purge_deleted, format_purge_report
 from bot.handlers.settings_menu import cb_purge_menu, cb_purge_apply_group, cb_manual_review
 from bot.keyboards.settings_kb import main_settings_kb
-from tests.conftest import make_tg_user, make_tg_chat, make_callback_query
+from tests.conftest import make_tg_user, make_tg_chat, make_callback_query, drain_purge_tasks
 
 
 @pytest.fixture(autouse=True)
@@ -230,7 +230,7 @@ async def test_purge_command_with_a_deleted_account_offers_confirm_and_removes_n
     await cmd_purge_deleted(message, mock_bot)
 
     markup = message.reply.call_args.kwargs["reply_markup"]
-    assert [b.callback_data for row in markup.inline_keyboard for b in row] == ["purge:apply"]
+    assert [b.callback_data for row in markup.inline_keyboard for b in row] == [f"purge:apply:{sample_group.id}"]
     assert "בדיקה בלבד, עדיין לא הוסר דבר." in message.reply.call_args.args[0]
     assert ban_commands_module._PENDING_PURGES[1]["group_id"] == sample_group.id
     mock_bot.decline_chat_join_request.assert_not_called()
@@ -262,6 +262,7 @@ async def test_settings_purge_first_press_removes_nothing_and_confirm_runs_once(
 
     first = make_callback_query(f"sm:purge:{sample_group.id}", user=owner)
     await cb_purge_menu(first, mock_bot)
+    await drain_purge_tasks()
 
     mock_bot.decline_chat_join_request.assert_not_called()
     assert f"sm:purge_apply:{sample_group.id}" in _button_data(first)
@@ -270,6 +271,7 @@ async def test_settings_purge_first_press_removes_nothing_and_confirm_runs_once(
 
     confirm = make_callback_query(f"sm:purge_apply:{sample_group.id}", user=owner)
     await cb_purge_apply_group(confirm, mock_bot)
+    await drain_purge_tasks()
     mock_bot.decline_chat_join_request.assert_called_once_with(sample_group.chat_id, 7010)
 
     again = make_callback_query(f"sm:purge_apply:{sample_group.id}", user=owner)
@@ -324,6 +326,7 @@ async def test_settings_purge_confirm_for_a_group_never_shown_is_refused(
 
     # Dry run on one group, crafted confirm for the other: refused.
     await cb_purge_menu(make_callback_query(f"sm:purge:{sample_group.id}", user=owner), mock_bot)
+    await drain_purge_tasks()
     crafted = make_callback_query(f"sm:purge_apply:{other.id}", user=owner)
     await cb_purge_apply_group(crafted, mock_bot)
     mock_bot.decline_chat_join_request.assert_not_called()

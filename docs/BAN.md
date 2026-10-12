@@ -275,11 +275,17 @@ ever removed without that record, and the confirm press re-checks
 authorization independently.
 
 1. `/purge_deleted [chat_id]` in `bot/handlers/ban_commands.py` - super-admin
-   only, confirm button `purge:apply`. Omit `chat_id` to scan every active,
-   non-banned group.
+   only. Omit `chat_id` to scan every active, non-banned group; the confirm
+   button is `purge:apply:all` for that case or `purge:apply:<group_id>` when
+   a `chat_id` was given. The scope travels inside the button itself, so a
+   button only ever acts on the dry run it came from: if a newer dry run (in
+   any of these four places) overwrites the pending record before the button
+   is pressed, the press is refused instead of running against the wrong
+   scope.
 2. The super-admin panel (`bot/handlers/superadmin.py`) has a
    "🧹 ממתינים של חשבונות מחוקים" button (`sa:purge_prompt`) that runs the
-   same dry run across every group and shows the same confirm button.
+   same dry run across every group and shows the same `purge:apply:all`
+   confirm button.
 3. The group settings menu (`/settings` → "🧹 ממתינים של חשבונות מחוקים",
    `sm:purge:<group_id>` in `bot/handlers/settings_menu.py`): a dry run
    scoped to that one group, for the same people who can open that group's

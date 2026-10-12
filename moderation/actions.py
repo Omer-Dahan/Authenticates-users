@@ -2,12 +2,13 @@
 manual-review button, the super-admin panel, and the terminal script.
 """
 import asyncio
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Awaitable, Callable, Optional
 
 from aiogram import Bot
-from aiogram.exceptions import TelegramAPIError
+from aiogram.exceptions import TelegramAPIError, TelegramRetryAfter
 from sqlalchemy import select, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -333,6 +334,73 @@ async def _close_sessions(db: AsyncSession, user_id: int, chat_id: int, now: dat
         session.passed = passed
 
 
+PURGE_CONCURRENCY = 5         # Telegram calls in flight at once during a purge sweep
+PURGE_MAX_RETRY_AFTER = 5     # 429s honoured per call before the call counts as failed
+
+ProgressCallback = Callable[[int, int], Awaitable[None]]
+
+
+async def _call_honouring_flood(call: Callable[[], Awaitable], attempts: int = PURGE_MAX_RETRY_AFTER):
+    """Runs one Telegram call, sleeping out every 429 instead of failing the row.
+
+    After `attempts` consecutive 429s the last one is raised and the caller's
+    normal error handling applies (the row stays open)."""
+    for attempt in range(attempts):
+        try:
+            return await call()
+        except TelegramRetryAfter as e:
+            if attempt == attempts - 1:
+                raise
+            logger.warning(f"purge_deleted: flood control, sleeping {e.retry_after}s")
+            await asyncio.sleep(e.retry_after)
+
+
+@dataclass
+class _PurgeOutcome:
+    kind: str                          # deleted | already_member | alive | inconclusive
+    access_error: Optional[str] = None
+    member_status: Optional[str] = None
+    decline_error: Optional[str] = None
+
+
+async def _probe_row(bot: Bot, chat_id: int, user_id: int, dry_run: bool) -> _PurgeOutcome:
+    """Telegram side of one row only. No database access here: the rows are
+    probed concurrently and the session is not safe to share between them."""
+    try:
+        member = await _call_honouring_flood(lambda: bot.get_chat_member(chat_id, user_id))
+    except TelegramAPIError as e:
+        err = str(e)
+        if any(marker in err.lower() for marker in _ACCESS_ERROR_MARKERS):
+            return _PurgeOutcome("inconclusive", access_error=err)
+
+        await asyncio.sleep(0.05)
+        try:
+            chat_info = await _call_honouring_flood(lambda: bot.get_chat(user_id))
+        except TelegramAPIError:
+            return _PurgeOutcome("inconclusive")
+
+        if not _looks_empty(chat_info.first_name, chat_info.username, chat_info.last_name):
+            return _PurgeOutcome("alive")
+    else:
+        user = member.user
+        if _looks_empty(user.first_name, user.username, user.last_name):
+            pass  # deleted account: the decline below is the decisive call
+        elif _is_member(member):
+            return _PurgeOutcome("already_member", member_status=member.status)
+        else:
+            return _PurgeOutcome("alive")
+
+    outcome = _PurgeOutcome("deleted")
+    if dry_run:
+        return outcome
+
+    try:
+        await _call_honouring_flood(lambda: bot.decline_chat_join_request(chat_id, user_id))
+    except TelegramAPIError as e:
+        outcome.decline_error = str(e)
+    return outcome
+
+
 async def purge_deleted_requests(
     bot: Bot,
     *,
@@ -342,6 +410,9 @@ async def purge_deleted_requests(
     actor_name: Optional[str] = None,
     db: AsyncSession = None,
     max_probes: int = 2000,
+    concurrency: int = PURGE_CONCURRENCY,
+    progress: Optional[ProgressCallback] = None,
+    progress_interval: float = 3.0,
 ) -> PurgeReport:
     report = PurgeReport()
     now = datetime.now(timezone.utc)
@@ -351,12 +422,11 @@ async def purge_deleted_requests(
         group_query = group_query.where(Group.id == group_id)
     groups = (await db.execute(group_query)).scalars().all()
 
-    probes_used = 0
-
+    # Phase 1 (database): collect every open row, up to the probe budget.
+    rows: list[tuple[Group, JoinRequest]] = []
     for g in groups:
-        title = g.title or str(g.chat_id)
-        stats = report.per_group.setdefault(g.id, {
-            "title": title,
+        report.per_group.setdefault(g.id, {
+            "title": g.title or str(g.chat_id),
             "checked": 0, "deleted_found": 0, "removed": 0, "request_gone": 0,
             "already_member": 0, "decline_failed": 0,
             "alive": 0, "inconclusive": 0, "access_error": None,
@@ -367,118 +437,115 @@ async def purge_deleted_requests(
             JoinRequest.decision.in_((DecisionEnum.pending, DecisionEnum.manual_review)),
             JoinRequest.resolved_at.is_(None),
         ))
-        join_requests = jr_result.scalars().all()
-
-        for jr in join_requests:
-            if probes_used >= max_probes:
+        for jr in jr_result.scalars().all():
+            if len(rows) >= max_probes:
                 report.stopped_early = True
                 break
-
-            report.checked += 1
-            stats["checked"] += 1
-            probes_used += 1
-
-            try:
-                member = await bot.get_chat_member(g.chat_id, jr.user_id)
-            except TelegramAPIError as e:
-                err = str(e)
-                if any(marker in err.lower() for marker in _ACCESS_ERROR_MARKERS):
-                    if stats["access_error"] is None:
-                        stats["access_error"] = err
-                        report.access_errors.append((title, err))
-                    report.inconclusive += 1
-                    stats["inconclusive"] += 1
-                    await asyncio.sleep(0.05)
-                    continue
-
-                await asyncio.sleep(0.05)
-                try:
-                    chat_info = await bot.get_chat(jr.user_id)
-                except TelegramAPIError:
-                    report.inconclusive += 1
-                    stats["inconclusive"] += 1
-                    await asyncio.sleep(0.05)
-                    continue
-
-                if not _looks_empty(chat_info.first_name, chat_info.username, chat_info.last_name):
-                    report.alive += 1
-                    stats["alive"] += 1
-                    await asyncio.sleep(0.05)
-                    continue
-            else:
-                user = member.user
-                if _looks_empty(user.first_name, user.username, user.last_name):
-                    pass  # deleted account: the decline below is the decisive call
-                elif _is_member(member):
-                    # Approved inside the Telegram app (or joined another way):
-                    # the request no longer exists. Closing the row is a
-                    # database-only change, nothing is sent to Telegram.
-                    report.already_member.append((title, jr.user_id))
-                    stats["already_member"] += 1
-                    if not dry_run:
-                        _close_row(db, jr, DecisionEnum.approved, ALREADY_MEMBER_NOTE, {
-                            "purge_deleted": True, "already_member": True,
-                            "status": member.status, "actor": actor_name,
-                        }, now)
-                        await _close_sessions(db, jr.user_id, g.chat_id, now, None)
-                    await asyncio.sleep(0.05)
-                    continue
-                else:
-                    report.alive += 1
-                    stats["alive"] += 1
-                    await asyncio.sleep(0.05)
-                    continue
-
-            known_user = (await db.execute(
-                select(TelegramUser).where(TelegramUser.telegram_id == jr.user_id)
-            )).scalar_one_or_none()
-            db_name = None
-            if known_user:
-                db_name = " ".join(
-                    part for part in (known_user.first_name, known_user.last_name) if part
-                ) or None
-
-            report.deleted_found.append((title, jr.user_id, db_name))
-            stats["deleted_found"] += 1
-
-            if dry_run:
-                await asyncio.sleep(0.05)
-                continue
-
-            try:
-                await bot.decline_chat_join_request(g.chat_id, jr.user_id)
-            except TelegramAPIError as e:
-                decline_error = str(e)
-                if is_request_missing_error(decline_error):
-                    report.request_gone.append((title, jr.user_id))
-                    stats["request_gone"] += 1
-                    _close_row(db, jr, DecisionEnum.rejected, PURGE_STALE_NOTE, {
-                        "purge_deleted": True, "evidence": "empty first_name",
-                        "decline_error": decline_error, "actor": actor_name,
-                    }, now)
-                    await _close_sessions(db, jr.user_id, g.chat_id, now, False)
-                else:
-                    # Nothing decisive came back (access, flood, network): the
-                    # request may still be on Telegram, so the row stays open.
-                    if any(marker in decline_error.lower() for marker in _ACCESS_ERROR_MARKERS):
-                        report.access_errors.append((title, decline_error))
-                    report.decline_failed.append((title, jr.user_id, decline_error))
-                    stats["decline_failed"] += 1
-                await asyncio.sleep(0.05)
-                continue
-
-            report.removed.append((title, jr.user_id))
-            stats["removed"] += 1
-            _close_row(db, jr, DecisionEnum.rejected, PURGE_NOTE, {
-                "purge_deleted": True, "evidence": "empty first_name",
-                "decline_error": None, "actor": actor_name,
-            }, now)
-            await _close_sessions(db, jr.user_id, g.chat_id, now, False)
-
-            await asyncio.sleep(0.05)
-
-        if probes_used >= max_probes:
+            rows.append((g, jr))
+        if report.stopped_early:
             break
+
+    # Phase 2 (Telegram): probe in parallel with bounded concurrency.
+    total = len(rows)
+    semaphore = asyncio.Semaphore(max(1, concurrency))
+    done = 0
+    last_progress = time.monotonic()
+
+    async def probe(g: Group, jr: JoinRequest) -> _PurgeOutcome:
+        nonlocal done, last_progress
+        async with semaphore:
+            try:
+                outcome = await _probe_row(bot, g.chat_id, jr.user_id, dry_run)
+            except Exception:  # never let one row sink the whole sweep; the row stays open
+                logger.exception(f"purge_deleted: probe failed for {jr.user_id} in {g.chat_id}")
+                outcome = _PurgeOutcome("inconclusive")
+            await asyncio.sleep(0.05)
+        done += 1
+        if progress is not None and time.monotonic() - last_progress >= progress_interval:
+            last_progress = time.monotonic()
+            try:
+                await progress(done, total)
+            except Exception:
+                logger.exception("purge_deleted: progress callback failed")
+        return outcome
+
+    outcomes = await asyncio.gather(*(probe(g, jr) for g, jr in rows))
+
+    # Phase 3 (database): apply the outcomes sequentially, in row order.
+    for (g, jr), outcome in zip(rows, outcomes):
+        title = g.title or str(g.chat_id)
+        stats = report.per_group[g.id]
+        report.checked += 1
+        stats["checked"] += 1
+
+        if outcome.kind == "inconclusive":
+            if outcome.access_error and stats["access_error"] is None:
+                stats["access_error"] = outcome.access_error
+                report.access_errors.append((title, outcome.access_error))
+            report.inconclusive += 1
+            stats["inconclusive"] += 1
+            continue
+
+        if outcome.kind == "alive":
+            report.alive += 1
+            stats["alive"] += 1
+            continue
+
+        if outcome.kind == "already_member":
+            # Approved inside the Telegram app (or joined another way): the
+            # request no longer exists. Closing the row is a database-only
+            # change, nothing is sent to Telegram.
+            report.already_member.append((title, jr.user_id))
+            stats["already_member"] += 1
+            if not dry_run:
+                _close_row(db, jr, DecisionEnum.approved, ALREADY_MEMBER_NOTE, {
+                    "purge_deleted": True, "already_member": True,
+                    "status": outcome.member_status, "actor": actor_name,
+                }, now)
+                await _close_sessions(db, jr.user_id, g.chat_id, now, None)
+            continue
+
+        known_user = (await db.execute(
+            select(TelegramUser).where(TelegramUser.telegram_id == jr.user_id)
+        )).scalar_one_or_none()
+        db_name = None
+        if known_user:
+            db_name = " ".join(
+                part for part in (known_user.first_name, known_user.last_name) if part
+            ) or None
+
+        report.deleted_found.append((title, jr.user_id, db_name))
+        stats["deleted_found"] += 1
+
+        if dry_run:
+            continue
+
+        decline_error = outcome.decline_error
+        if decline_error is not None:
+            if is_request_missing_error(decline_error):
+                report.request_gone.append((title, jr.user_id))
+                stats["request_gone"] += 1
+                _close_row(db, jr, DecisionEnum.rejected, PURGE_STALE_NOTE, {
+                    "purge_deleted": True, "evidence": "empty first_name",
+                    "decline_error": decline_error, "actor": actor_name,
+                }, now)
+                await _close_sessions(db, jr.user_id, g.chat_id, now, False)
+            else:
+                # Nothing decisive came back (access, flood, network): the
+                # request may still be on Telegram, so the row stays open.
+                if any(marker in decline_error.lower() for marker in _ACCESS_ERROR_MARKERS):
+                    report.access_errors.append((title, decline_error))
+                report.decline_failed.append((title, jr.user_id, decline_error))
+                stats["decline_failed"] += 1
+            continue
+
+        report.removed.append((title, jr.user_id))
+        stats["removed"] += 1
+        _close_row(db, jr, DecisionEnum.rejected, PURGE_NOTE, {
+            "purge_deleted": True, "evidence": "empty first_name",
+            "decline_error": None, "actor": actor_name,
+        }, now)
+        await _close_sessions(db, jr.user_id, g.chat_id, now, False)
 
     await db.flush()
     await db.commit()
