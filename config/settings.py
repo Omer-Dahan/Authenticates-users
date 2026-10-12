@@ -33,6 +33,12 @@ class Settings(BaseSettings):
     heartbeat_interval_seconds: int = Field(default=60, env="HEARTBEAT_INTERVAL_SECONDS")
     recovery_grace_seconds: int = Field(default=30, env="RECOVERY_GRACE_SECONDS")
 
+    # Join-request reconciliation sweep (bot's join_requests rows vs what
+    # Telegram can actually confirm - see moderation/actions.py)
+    reconciliation_stale_days: int = Field(default=7, env="RECONCILIATION_STALE_DAYS")
+    reconciliation_daily_sweep_enabled: bool = Field(default=True, env="RECONCILIATION_DAILY_SWEEP_ENABLED")
+    reconciliation_daily_interval_seconds: int = Field(default=86400, env="RECONCILIATION_DAILY_INTERVAL_SECONDS")
+
     model_config = {
         "env_file": ".env",
         "env_file_encoding": "utf-8",

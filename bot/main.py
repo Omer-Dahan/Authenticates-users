@@ -18,7 +18,7 @@ from database.init_db import init_db
 from database.session import AsyncSessionLocal
 from moderation import ModerationEngine
 from verification import VerificationEngine, start_cleanup_loop
-from recovery import detect_outage, start_heartbeat_loop, run_recovery_sweep
+from recovery import detect_outage, start_heartbeat_loop, run_recovery_sweep, start_daily_reconciliation_loop
 
 from bot.handlers import join_requests, verification, setup, settings_menu, member_events
 from bot.handlers import rules_menu, questions_menu, lists_menu, superadmin, start, ban_commands
@@ -95,6 +95,13 @@ async def main() -> None:
     # so it waits for the recovery sweep before its first run
     asyncio.create_task(start_cleanup_loop(
         bot, interval_seconds=60, recovery_done_event=recovery_done_event,
+    ))
+
+    # Daily quiet reconciliation sweep - gated the same way, so its first run
+    # cannot race the one-off reconciliation pass run_recovery_sweep itself
+    # runs right after the outage recovery sweep finishes (recovery/sweep.py).
+    asyncio.create_task(start_daily_reconciliation_loop(
+        bot, recovery_done_event=recovery_done_event,
     ))
 
     await dp.start_polling(

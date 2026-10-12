@@ -29,6 +29,9 @@ def main_settings_kb(group_id: int) -> InlineKeyboardMarkup:
         InlineKeyboardButton(text="🧹 ממתינים של חשבונות מחוקים", callback_data=f"sm:purge:{g}"),
     )
     builder.row(
+        InlineKeyboardButton(text="🔁 התאמה מול טלגרם", callback_data=f"sm:reconcile_menu:{g}"),
+    )
+    builder.row(
         InlineKeyboardButton(text="🔄 ייבוא הגדרות", callback_data=f"sm:import:{g}"),
         InlineKeyboardButton(text="💾 קבע כברירת מחדל", callback_data=f"sm:set_default:{g}"),
     )
@@ -58,6 +61,30 @@ def purge_settings_kb(group_id: int, can_apply: bool) -> InlineKeyboardMarkup:
         builder.row(InlineKeyboardButton(text="🧹 אישור הסרה", callback_data=f"sm:purge_apply:{g}"))
     builder.row(InlineKeyboardButton(text="🔄 בדיקה מחדש", callback_data=f"sm:purge:{g}"))
     builder.row(InlineKeyboardButton(text="◀️ חזרה להגדרות", callback_data=f"sm:main:{g}"))
+    builder.row(InlineKeyboardButton(text="🏠 רשימת קבוצות", callback_data="start:refresh"))
+    return builder.as_markup()
+
+
+def reconcile_menu_kb(group_id: int, daily_enabled: bool) -> InlineKeyboardMarkup:
+    g = group_id
+    builder = InlineKeyboardBuilder()
+    builder.row(InlineKeyboardButton(text="🔍 הרץ בדיקה עכשיו", callback_data=f"sm:reconcile:{g}"))
+    if daily_enabled:
+        builder.row(InlineKeyboardButton(text="🔕 כבה בדיקה יומית", callback_data=f"sm:recon_toggle:{g}:off"))
+    else:
+        builder.row(InlineKeyboardButton(text="🔔 הפעל בדיקה יומית", callback_data=f"sm:recon_toggle:{g}:on"))
+    builder.row(InlineKeyboardButton(text="◀️ חזרה להגדרות", callback_data=f"sm:main:{g}"))
+    builder.row(InlineKeyboardButton(text="🏠 רשימת קבוצות", callback_data="start:refresh"))
+    return builder.as_markup()
+
+
+def reconcile_report_kb(group_id: int, can_apply: bool) -> InlineKeyboardMarkup:
+    g = group_id
+    builder = InlineKeyboardBuilder()
+    if can_apply:
+        builder.row(InlineKeyboardButton(text="✅ אשר וסגור", callback_data=f"sm:reconcile_apply:{g}"))
+    builder.row(InlineKeyboardButton(text="🔄 בדיקה מחדש", callback_data=f"sm:reconcile:{g}"))
+    builder.row(InlineKeyboardButton(text="◀️ חזרה", callback_data=f"sm:reconcile_menu:{g}"))
     builder.row(InlineKeyboardButton(text="🏠 רשימת קבוצות", callback_data="start:refresh"))
     return builder.as_markup()
 

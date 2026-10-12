@@ -10,6 +10,7 @@ from aiogram import Bot
 from aiogram.exceptions import TelegramAPIError
 from sqlalchemy import select
 
+from config import settings
 from database.session import AsyncSessionLocal
 from database.models import (
     Group, GroupConfig, GroupQuestion, JoinRequest, DecisionEnum, ModerationLog,
@@ -311,16 +312,47 @@ async def run_recovery_sweep(
     Always sets recovery_done_event when finished (or immediately if there was
     no outage to begin with) so start_cleanup_loop knows it is safe to decline
     expired sessions.
+
+    Once recovery_done_event is set, also runs the join-request reconciliation
+    sweep once per active group (run_daily_reconciliation, the same bounded,
+    per-group-try/except sweep the daily loop uses) so approvals, declines, or
+    departures that happened while the bot was down are caught right after
+    startup instead of waiting for the daily loop's own interval. This runs
+    after the event is set so it never delays start_cleanup_loop or the daily
+    reconciliation loop from being unblocked, and a failure here is logged and
+    swallowed rather than affecting recovery itself.
+
+    settings.reconciliation_daily_sweep_enabled is the master switch for this
+    whole quiet sweep, including this always-real (dry_run=False) post-
+    recovery pass and the age-based auto-close it can trigger - so it is
+    honoured here too, not just in the daily loop. Turning it off only stops
+    this quiet startup pass; the on-demand /reconcile command and the
+    settings-menu button stay available regardless.
     """
     await asyncio.sleep(grace_seconds)
 
     if outage_started_at is None:
         recovery_done_event.set()
+    else:
+        try:
+            await _sweep(bot, ver_engine, outage_started_at, outage_seconds)
+        except Exception as e:  # pylint: disable=broad-except
+            logger.error("Recovery sweep failed", error=str(e))
+        finally:
+            recovery_done_event.set()
+
+    if not settings.reconciliation_daily_sweep_enabled:
+        logger.info("Daily reconciliation sweep disabled via settings; skipping post-recovery reconciliation pass")
         return
 
+    from recovery.reconciliation_loop import run_daily_reconciliation, mark_recovery_sweep_started
+    # Set synchronously, before the first await below, so the daily loop -
+    # which only decides whether to skip its own first iteration after
+    # waiting on recovery_done_event - can never observe this as unset once
+    # that event has been seen set (single-threaded asyncio scheduling
+    # guarantees this runs before the daily loop's waiter resumes).
+    mark_recovery_sweep_started()
     try:
-        await _sweep(bot, ver_engine, outage_started_at, outage_seconds)
+        await run_daily_reconciliation(bot)
     except Exception as e:  # pylint: disable=broad-except
-        logger.error("Recovery sweep failed", error=str(e))
-    finally:
-        recovery_done_event.set()
+        logger.error("Post-recovery reconciliation sweep failed", error=str(e))

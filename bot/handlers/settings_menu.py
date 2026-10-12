@@ -16,15 +16,19 @@ from database.clone_utils import get_difference_summary, clone_group_settings
 from bot.keyboards.settings_kb import (
     main_settings_kb, security_mode_kb, back_to_main_kb, languages_list_kb,
     import_list_kb, import_confirm_kb, notify_settings_kb, ban_scope_kb, admin_review_kb,
-    purge_settings_kb,
+    purge_settings_kb, reconcile_menu_kb, reconcile_report_kb,
 )
 from bot.handlers.admin_utils import register_group_admin, mark_settings_edited
 from bot.handlers.ban_commands import (
     format_purge_report, _store_pending_purge, _pop_pending_purge,
-    safe_answer, start_purge_task, purge_in_progress, _PURGE_PROGRESS_INTERVAL,
+    format_reconciliation_report, _store_pending_reconcile, _pop_pending_reconcile,
+    _reconcile_can_apply, safe_answer, start_purge_task, purge_in_progress, _PURGE_PROGRESS_INTERVAL,
 )
 from bot.text import esc
-from moderation.actions import ban_user, BanReport, purge_deleted_requests, is_request_missing_error
+from moderation.actions import (
+    ban_user, BanReport, purge_deleted_requests, is_request_missing_error,
+    run_reconciliation_sweep,
+)
 from config import settings
 from logs import get_logger
 
@@ -336,6 +340,172 @@ async def cb_purge_apply_group(callback: CallbackQuery, bot: Bot) -> None:
     )
 
 
+# ─── Reconciliation sweep against Telegram (per group) ────────────────────────
+
+_RECONCILE_CONFIG_KEY = "reconciliation_daily_enabled"
+
+
+async def _group_reconcile_enabled(group_id: int, db) -> bool:
+    result = await db.execute(
+        select(GroupConfig).where(GroupConfig.group_id == group_id, GroupConfig.key == _RECONCILE_CONFIG_KEY)
+    )
+    cfg = result.scalar_one_or_none()
+    if not cfg or cfg.value is None:
+        return True  # sane default: a group participates in the daily sweep unless turned off
+    return cfg.value.lower() in ("true", "1", "yes")
+
+
+@router.callback_query(F.data.startswith("sm:reconcile_menu:"))
+async def cb_reconcile_menu(callback: CallbackQuery) -> None:
+    group_id = int(callback.data.split(":")[2])
+
+    async with AsyncSessionLocal() as db:
+        group = await _get_group_by_id(group_id, db)
+        if not group:
+            await callback.answer("קבוצה לא נמצאה.")
+            return
+        if not await _can_manage_group(group, callback.from_user.id, db):
+            await callback.answer("אין לך גישה לקבוצה זו.", show_alert=True)
+            return
+        daily_enabled = await _group_reconcile_enabled(group_id, db)
+
+    status = "🔔 פעילה" if daily_enabled else "🔕 כבויה"
+    await callback.message.edit_text(
+        f"🔁 <b>התאמה מול טלגרם: {esc(group.title)}</b>\n\n"
+        f"הבדיקה הזו עוברת על בקשות הצטרפות פתוחות שהבוט מחזיק ובודקת מול טלגרם "
+        f"מה אפשר להוכיח: המשתמש הצטרף, החשבון נמחק, או שהוא הוסר מהקבוצה. "
+        f"בקשה שלא ניתן לקבוע את מצבה נשארת פתוחה, ונסגרת אוטומטית כ\"לא ידוע\" "
+        f"רק אם חלפו {settings.reconciliation_stale_days} ימים ועדיין לא ניתן לקבוע.\n\n"
+        f"בדיקה יומית אוטומטית: {status}",
+        parse_mode="HTML",
+        reply_markup=reconcile_menu_kb(group_id, daily_enabled),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("sm:recon_toggle:"))
+async def cb_recon_toggle(callback: CallbackQuery) -> None:
+    parts = callback.data.split(":")
+    group_id = int(parts[2])
+    state = parts[3]
+
+    if state not in ("on", "off"):
+        await callback.answer("ערך לא חוקי.")
+        return
+
+    async with AsyncSessionLocal() as db:
+        group = await _get_group_by_id(group_id, db)
+        if not group or not await _can_manage_group(group, callback.from_user.id, db):
+            await callback.answer("אין לך גישה לקבוצה זו.", show_alert=True)
+            return
+        await _set_config(group_id, _RECONCILE_CONFIG_KEY, "true" if state == "on" else "false", "bool", db)
+        await mark_settings_edited(group_id, callback.from_user.id, callback.from_user.username, callback.from_user.first_name, db)
+        await db.commit()
+        daily_enabled = await _group_reconcile_enabled(group_id, db)
+
+    status = "🔔 פעילה" if daily_enabled else "🔕 כבויה"
+    await callback.answer(f"בדיקה יומית אוטומטית: {status}", show_alert=True)
+    await callback.message.edit_reply_markup(reply_markup=reconcile_menu_kb(group_id, daily_enabled))
+
+
+@router.callback_query(F.data.startswith("sm:reconcile:"))
+async def cb_reconcile(callback: CallbackQuery, bot: Bot) -> None:
+    group_id = int(callback.data.split(":")[2])
+
+    async with AsyncSessionLocal() as db:
+        group = await _get_group_by_id(group_id, db)
+        if not group:
+            await callback.answer("קבוצה לא נמצאה.")
+            return
+        if not await _can_manage_group(group, callback.from_user.id, db):
+            await callback.answer("אין לך גישה לקבוצה זו.", show_alert=True)
+            return
+
+    if purge_in_progress(callback.from_user.id):
+        await safe_answer(callback, "בדיקה אחרת עדיין רצה. ההודעה שלה תתעדכן בסיום.", show_alert=True)
+        return
+
+    # Answer before any probing: the query expires long before a sweep ends.
+    await safe_answer(callback, "הבדיקה התחילה. ההודעה תתעדכן בסיום.")
+
+    admin_id = callback.from_user.id
+    actor_name = callback.from_user.username or str(callback.from_user.id)
+    header = f"🔁 <b>התאמה מול טלגרם: {esc(group.title)}</b>"
+
+    async def sweep(progress):
+        # First press: a dry run scoped to this group only. Nothing is closed
+        # until the confirm button below is pressed.
+        async with AsyncSessionLocal() as db:
+            report = await run_reconciliation_sweep(
+                bot, group_id=group.id, dry_run=True,
+                actor_name=actor_name, db=db,
+                progress=progress, progress_interval=_PURGE_PROGRESS_INTERVAL,
+            )
+
+        can_apply = _reconcile_can_apply(report)
+        if can_apply:
+            _store_pending_reconcile(admin_id, group.id)
+        else:
+            _pop_pending_reconcile(admin_id)
+
+        footer = (
+            "לחץ על <b>אשר וסגור</b> כדי לסגור את מה שהוכח מול טלגרם."
+            if can_apply else "אין מה לסגור בקבוצה זו."
+        )
+        text = (
+            f"{header}\n"
+            f"בדיקה בלבד, עדיין לא נסגר דבר.\n\n"
+            f"{format_reconciliation_report(report, applied=False)}\n\n"
+            f"{footer}"
+        )
+        return text, reconcile_report_kb(group.id, can_apply)
+
+    start_purge_task(callback.message, admin_id, header, sweep, bot, failure_markup=back_to_main_kb(group.id))
+
+
+@router.callback_query(F.data.startswith("sm:reconcile_apply:"))
+async def cb_reconcile_apply_group(callback: CallbackQuery, bot: Bot) -> None:
+    group_id = int(callback.data.split(":")[2])
+
+    async with AsyncSessionLocal() as db:
+        group = await _get_group_by_id(group_id, db)
+        if not group or not await _can_manage_group(group, callback.from_user.id, db):
+            await callback.answer("אין לך גישה לקבוצה זו.", show_alert=True)
+            return
+
+    if purge_in_progress(callback.from_user.id):
+        await safe_answer(callback, "בדיקה אחרת עדיין רצה. ההודעה שלה תתעדכן בסיום.", show_alert=True)
+        return
+
+    # The confirm acts only on the dry run this admin was shown for this
+    # exact group, and only once: the record is consumed here.
+    pending = _pop_pending_reconcile(callback.from_user.id)
+    if pending is None or pending["group_id"] != group.id:
+        await safe_answer(callback, "הבדיקה פגה או שכבר בוצעה. יש להריץ את הבדיקה מחדש.", show_alert=True)
+        return
+
+    # Answer before any probing: the query expires long before a sweep ends.
+    await safe_answer(callback, "הסגירה התחילה. ההודעה תתעדכן בסיום.")
+
+    admin_id = callback.from_user.id
+    actor_name = callback.from_user.username or str(callback.from_user.id)
+
+    async def sweep(progress):
+        async with AsyncSessionLocal() as db:
+            report = await run_reconciliation_sweep(
+                bot, group_id=pending["group_id"], dry_run=False,
+                actor_name=actor_name, db=db,
+                progress=progress, progress_interval=_PURGE_PROGRESS_INTERVAL,
+            )
+        text = f"🔁 <b>התאמה בוצעה: {esc(group.title)}</b>\n\n{format_reconciliation_report(report, applied=True)}"
+        return text, back_to_main_kb(group.id)
+
+    start_purge_task(
+        callback.message, admin_id, f"🔁 <b>התאמה מול טלגרם: {esc(group.title)}</b>",
+        sweep, bot, failure_markup=back_to_main_kb(group.id),
+    )
+
+
 # ─── Statistics ───────────────────────────────────────────────────────────────
 
 @router.callback_query(F.data.startswith("sm:stats:"))
@@ -367,6 +537,7 @@ async def cb_stats(callback: CallbackQuery) -> None:
         f"🔨 חסומים: {counts[DecisionEnum.banned]}\n"
         f"👀 סקירה ידנית: {counts[DecisionEnum.manual_review]}\n"
         f"⏳ ממתינים: {counts[DecisionEnum.pending]}\n"
+        f"🕓 נסגרו אוטומטית (גיל, לא ידוע): {counts[DecisionEnum.stale]}\n"
         f"─────────────────\n"
         f"סה\"כ: {total} | אחוז אישור: {rate}"
     )

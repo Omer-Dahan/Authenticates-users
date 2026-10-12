@@ -11,10 +11,11 @@ from database.models import Group, JoinRequest, DecisionEnum, ModerationLog, Use
 from bot.keyboards.settings_kb import ban_scope_picker_kb, bans_list_kb
 from bot.handlers.ban_commands import (
     format_purge_report, _store_pending_purge, _pop_pending_purge,
-    safe_answer, start_purge_task, purge_in_progress, _PURGE_PROGRESS_INTERVAL,
+    format_reconciliation_report, _store_pending_reconcile, _pop_pending_reconcile,
+    _reconcile_can_apply, safe_answer, start_purge_task, purge_in_progress, _PURGE_PROGRESS_INTERVAL,
 )
 from bot.text import esc
-from moderation.actions import purge_deleted_requests
+from moderation.actions import purge_deleted_requests, run_reconciliation_sweep
 from config import settings
 from logs import get_logger
 
@@ -88,6 +89,9 @@ async def cmd_admin(message: Message) -> None:
     builder.row(
         InlineKeyboardButton(text="🧹 ממתינים של חשבונות מחוקים", callback_data="sa:purge_prompt"),
     )
+    builder.row(
+        InlineKeyboardButton(text="🔁 התאמה מול טלגרם, כל הקבוצות", callback_data="sa:reconcile_prompt"),
+    )
 
     await message.answer(
         f"🔑 <b>פאנל סופר-אדמין</b>\n\n"
@@ -131,6 +135,9 @@ async def cb_admin_main(callback: CallbackQuery) -> None:
     )
     builder.row(
         InlineKeyboardButton(text="🧹 ממתינים של חשבונות מחוקים", callback_data="sa:purge_prompt"),
+    )
+    builder.row(
+        InlineKeyboardButton(text="🔁 התאמה מול טלגרם, כל הקבוצות", callback_data="sa:reconcile_prompt"),
     )
 
     await callback.message.edit_text(
@@ -382,6 +389,51 @@ async def cb_purge_prompt(callback: CallbackQuery, bot: Bot) -> None:
 
         footer = "" if can_apply else "\n\nאין מה להסיר."
         return f"{header}\n\n{format_purge_report(report, applied=False)}{footer}", builder.as_markup()
+
+    start_purge_task(callback.message, admin_id, header, sweep, bot, failure_markup=back.as_markup())
+
+
+# ─── Reconciliation sweep against Telegram, all groups (access path 2) ───────
+
+@router.callback_query(F.data == "sa:reconcile_prompt")
+async def cb_reconcile_prompt(callback: CallbackQuery, bot: Bot) -> None:
+    if not _is_super_admin(callback.from_user.id):
+        await callback.answer()
+        return
+
+    if purge_in_progress(callback.from_user.id):
+        await safe_answer(callback, "בדיקה אחרת עדיין רצה. ההודעה שלה תתעדכן בסיום.", show_alert=True)
+        return
+
+    # Answer before any probing: the query expires long before a sweep ends.
+    await safe_answer(callback, "הבדיקה התחילה. ההודעה תתעדכן בסיום.")
+
+    admin_id = callback.from_user.id
+    actor_name = callback.from_user.username or str(callback.from_user.id)
+    header = "🔁 <b>התאמה מול טלגרם, כל הקבוצות</b>"
+
+    back = InlineKeyboardBuilder()
+    back.row(InlineKeyboardButton(text="◀️ חזרה", callback_data="sa:main"))
+
+    async def sweep(progress):
+        async with AsyncSessionLocal() as db:
+            report = await run_reconciliation_sweep(
+                bot, dry_run=True,
+                actor_name=actor_name, db=db,
+                progress=progress, progress_interval=_PURGE_PROGRESS_INTERVAL,
+            )
+
+        can_apply = _reconcile_can_apply(report)
+        builder = InlineKeyboardBuilder()
+        if can_apply:
+            _store_pending_reconcile(admin_id, None)
+            builder.row(InlineKeyboardButton(text="✅ אשר וסגור", callback_data="recon:apply:all"))
+        else:
+            _pop_pending_reconcile(admin_id)
+        builder.row(InlineKeyboardButton(text="◀️ חזרה", callback_data="sa:main"))
+
+        footer = "" if can_apply else "\n\nאין מה לסגור."
+        return f"{header}\n\n{format_reconciliation_report(report, applied=False)}{footer}", builder.as_markup()
 
     start_purge_task(callback.message, admin_id, header, sweep, bot, failure_markup=back.as_markup())
 

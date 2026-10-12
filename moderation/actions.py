@@ -4,12 +4,12 @@ manual-review button, the super-admin panel, and the terminal script.
 import asyncio
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Awaitable, Callable, Optional
 
 from aiogram import Bot
 from aiogram.exceptions import TelegramAPIError, TelegramRetryAfter
-from sqlalchemy import select, or_
+from sqlalchemy import select, or_, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from database.models import (
@@ -307,11 +307,22 @@ def is_request_missing_error(err: str) -> bool:
     return _REQUEST_MISSING_MARKER in err.lower()
 
 
-def _close_row(db: AsyncSession, jr: JoinRequest, decision: DecisionEnum, note: str,
-               details: dict, now: datetime) -> None:
-    jr.decision = decision
-    jr.resolved_at = now
-    jr.notes = note
+async def _close_row(db: AsyncSession, jr: JoinRequest, decision: DecisionEnum, note: str,
+                     details: dict, now: datetime) -> bool:
+    """Closes jr only if it is still open (resolved_at IS NULL) at the moment
+    of the write. A conditional UPDATE, not a plain attribute assignment, so a
+    decision made elsewhere (a manual approve/reject/ban) while this sweep's
+    probes were in flight always wins, and the same row is never closed
+    twice. Returns whether this call actually closed it; the caller must
+    skip its own follow-up bookkeeping (sessions, counters, logs) when it
+    did not."""
+    result = await db.execute(
+        update(JoinRequest)
+        .where(JoinRequest.id == jr.id, JoinRequest.resolved_at.is_(None))
+        .values(decision=decision, resolved_at=now, notes=note)
+    )
+    if result.rowcount == 0:
+        return False
     db.add(ModerationLog(
         group_id=jr.group_id,
         join_request_id=jr.id,
@@ -321,6 +332,7 @@ def _close_row(db: AsyncSession, jr: JoinRequest, decision: DecisionEnum, note: 
         matched_rules=jr.matched_rules,
         details=details,
     ))
+    return True
 
 
 async def _close_sessions(db: AsyncSession, user_id: int, chat_id: int, now: datetime, passed) -> None:
@@ -495,14 +507,22 @@ async def purge_deleted_requests(
             # Approved inside the Telegram app (or joined another way): the
             # request no longer exists. Closing the row is a database-only
             # change, nothing is sent to Telegram.
+            if dry_run:
+                report.already_member.append((title, jr.user_id))
+                stats["already_member"] += 1
+                continue
+            closed = await _close_row(db, jr, DecisionEnum.approved, ALREADY_MEMBER_NOTE, {
+                "purge_deleted": True, "already_member": True,
+                "status": outcome.member_status, "actor": actor_name,
+            }, now)
+            if not closed:
+                # A decision taken elsewhere while this sweep's probes were
+                # running already resolved the row; it wins, and this sweep
+                # never overwrites or double-logs it.
+                continue
+            await _close_sessions(db, jr.user_id, g.chat_id, now, None)
             report.already_member.append((title, jr.user_id))
             stats["already_member"] += 1
-            if not dry_run:
-                _close_row(db, jr, DecisionEnum.approved, ALREADY_MEMBER_NOTE, {
-                    "purge_deleted": True, "already_member": True,
-                    "status": outcome.member_status, "actor": actor_name,
-                }, now)
-                await _close_sessions(db, jr.user_id, g.chat_id, now, None)
             continue
 
         known_user = (await db.execute(
@@ -523,13 +543,14 @@ async def purge_deleted_requests(
         decline_error = outcome.decline_error
         if decline_error is not None:
             if is_request_missing_error(decline_error):
-                report.request_gone.append((title, jr.user_id))
-                stats["request_gone"] += 1
-                _close_row(db, jr, DecisionEnum.rejected, PURGE_STALE_NOTE, {
+                closed = await _close_row(db, jr, DecisionEnum.rejected, PURGE_STALE_NOTE, {
                     "purge_deleted": True, "evidence": "empty first_name",
                     "decline_error": decline_error, "actor": actor_name,
                 }, now)
-                await _close_sessions(db, jr.user_id, g.chat_id, now, False)
+                if closed:
+                    await _close_sessions(db, jr.user_id, g.chat_id, now, False)
+                    report.request_gone.append((title, jr.user_id))
+                    stats["request_gone"] += 1
             else:
                 # Nothing decisive came back (access, flood, network): the
                 # request may still be on Telegram, so the row stays open.
@@ -539,13 +560,380 @@ async def purge_deleted_requests(
                 stats["decline_failed"] += 1
             continue
 
-        report.removed.append((title, jr.user_id))
-        stats["removed"] += 1
-        _close_row(db, jr, DecisionEnum.rejected, PURGE_NOTE, {
+        closed = await _close_row(db, jr, DecisionEnum.rejected, PURGE_NOTE, {
             "purge_deleted": True, "evidence": "empty first_name",
             "decline_error": None, "actor": actor_name,
         }, now)
-        await _close_sessions(db, jr.user_id, g.chat_id, now, False)
+        if closed:
+            await _close_sessions(db, jr.user_id, g.chat_id, now, False)
+            report.removed.append((title, jr.user_id))
+            stats["removed"] += 1
+
+    await db.flush()
+    await db.commit()
+    return report
+
+
+# ─── Reconciliation sweep: close whatever a probe can prove ───────────────────
+
+# The gap this closes: Telegram sends the bot an update when a join request is
+# CREATED, and nothing else - an admin approving or declining inside the
+# Telegram app, or the user withdrawing, produces no update at all. So an open
+# JoinRequest row drifts further from reality the longer it sits, and the only
+# way back is to ask Telegram directly about every user id the bot already
+# holds. getChatMember proves membership and nothing else (see module docstring
+# above purge_deleted_requests for the full rundown of what each call can and
+# cannot tell us); it is read-only and safe to call for every row. The only
+# destructive call this sweep ever makes is declineChatJoinRequest, and - same
+# rule as the purge above - only after the account is already proven deleted,
+# never against a live applicant.
+
+RECONCILE_ACTOR_LABEL = "בוט (בדיקת התאמה)"
+
+RECON_JOINED_NOTE = "המשתמש נמצא כחבר בקבוצה, הבקשה הסתיימה מחוץ לבוט"
+RECON_DELETED_NOTE = "חשבון מחוק, הבקשה נדחתה"
+RECON_DELETED_STALE_NOTE = "חשבון מחוק, הבקשה לא היתה קיימת יותר בטלגרם"
+RECON_BANNED_NOTE = "המשתמש חסום או הוסר מהקבוצה מחוץ לבוט"
+RECON_AUTO_CLOSE_NOTE = (
+    "לא ניתן היה לקבוע את מצב הבקשה מול טלגרם, והיא נסגרה אוטומטית בגלל גיל "
+    "של מעל {days} ימים. זו לא אישור ולא דחייה, רק סגירה כנה של בקשה לא ידועה."
+)
+
+RECONCILE_API_NOTE = (
+    "ℹ️ הבדיקה הזו רואה רק בקשות שהבוט כבר מכיר, ואינה יכולה לדעת כמה בקשות "
+    "ממתינות מופיעות כרגע באפליקציה של טלגרם. המספר שמופיע שם הוא המספר "
+    "האמיתי. הבדיקה הזו סוגרת רק מה שהוכח בוודאות מול טלגרם."
+)
+
+
+@dataclass
+class ReconciliationReport:
+    checked: int = 0                                    # open rows the bot holds
+    joined: list = field(default_factory=list)           # (title, user_id) now a member
+    deleted: list = field(default_factory=list)           # (title, user_id) deleted account, declined
+    deleted_request_gone: list = field(default_factory=list)   # (title, user_id) deleted, Telegram no longer had it
+    banned: list = field(default_factory=list)            # (title, user_id) kicked outside the bot
+    auto_closed_stale: list = field(default_factory=list)  # (title, user_id) too old, could not be proven
+    undetermined: int = 0                                 # left open, nothing provable
+    access_errors: list = field(default_factory=list)     # (title, error_string)
+    stale_skipped_groups: list = field(default_factory=list)  # titles: group had a probe error, so no stale-closing ran there this run
+    per_group: dict = field(default_factory=dict)         # keyed by Group.id, carries "title"
+    member_counts: dict = field(default_factory=dict)     # keyed by Group.id, Telegram's count or None
+    stopped_early: bool = False
+
+
+@dataclass
+class _ReconOutcome:
+    kind: str                          # joined | deleted | banned | undetermined
+    access_error: Optional[str] = None
+    member_status: Optional[str] = None
+    decline_error: Optional[str] = None
+    # True whenever this outcome came from a probe failure (an access error,
+    # a network error, an exhausted 429, or any other exception) rather than
+    # a genuine answer from Telegram. Never eligible for the stale-close
+    # rule below - only a real "left"/"not a member" status from a
+    # successful getChatMember call is.
+    is_error: bool = False
+
+
+def _row_age(created_at: Optional[datetime], now: datetime) -> Optional[timedelta]:
+    """Returns None when the row's age cannot be determined at all (no
+    created_at). An unknown age is a deliberate exemption from the stale
+    rule, not an assumption that the row is either very old or very fresh -
+    see the stale-eligibility check in run_reconciliation_sweep."""
+    if created_at is None:
+        return None
+    if created_at.tzinfo is None:
+        created_at = created_at.replace(tzinfo=timezone.utc)
+    return now - created_at
+
+
+async def _probe_reconciliation_row(bot: Bot, chat_id: int, user_id: int, dry_run: bool) -> _ReconOutcome:
+    """Telegram side of one row only, same isolation rule as _probe_row above:
+    no database access here, rows are probed concurrently.
+
+    Only two kinds of outcome count as genuine evidence the stale rule may
+    act on: "joined"/"banned" (decisive either way) and an undetermined
+    outcome carrying a real member_status straight from a successful
+    getChatMember call (typically "left"). Every failure path - an access
+    error, the get_chat fallback also failing, an exhausted 429, a network
+    error, or any other exception - is marked is_error=True so a transient
+    probe failure is never mistaken for proof the user left the group."""
+    try:
+        member = await _call_honouring_flood(lambda: bot.get_chat_member(chat_id, user_id))
+    except TelegramAPIError as e:
+        err = str(e)
+        if any(marker in err.lower() for marker in _ACCESS_ERROR_MARKERS):
+            return _ReconOutcome("undetermined", access_error=err, is_error=True)
+
+        await asyncio.sleep(0.05)
+        try:
+            chat_info = await _call_honouring_flood(lambda: bot.get_chat(user_id))
+        except TelegramAPIError:
+            return _ReconOutcome("undetermined", is_error=True)
+
+        if not _looks_empty(chat_info.first_name, chat_info.username, chat_info.last_name):
+            # Account is alive, but the membership probe itself failed for a
+            # non-access reason: that proves nothing about membership, so it
+            # is still an error for stale purposes, not a genuine answer.
+            return _ReconOutcome("undetermined", is_error=True)
+    else:
+        user = member.user
+        if _looks_empty(user.first_name, user.username, user.last_name):
+            pass  # deleted account: the decline below is the decisive call
+        elif _is_member(member):
+            return _ReconOutcome("joined", member_status=member.status)
+        elif member.status == "kicked":
+            return _ReconOutcome("banned", member_status=member.status)
+        else:
+            # getChatMember answered directly with a real, non-member status
+            # (typically "left") - the only genuine evidence the stale rule
+            # may act on.
+            return _ReconOutcome("undetermined", member_status=member.status)
+
+    outcome = _ReconOutcome("deleted")
+    if dry_run:
+        return outcome
+
+    try:
+        await _call_honouring_flood(lambda: bot.decline_chat_join_request(chat_id, user_id))
+    except TelegramAPIError as e:
+        outcome.decline_error = str(e)
+    return outcome
+
+
+async def run_reconciliation_sweep(
+    bot: Bot,
+    *,
+    group_id: Optional[int] = None,
+    dry_run: bool = True,
+    stale_days: Optional[int] = None,
+    actor_name: str = RECONCILE_ACTOR_LABEL,
+    db: AsyncSession = None,
+    max_probes: int = 2000,
+    concurrency: int = PURGE_CONCURRENCY,
+    progress: Optional[ProgressCallback] = None,
+    progress_interval: float = 3.0,
+) -> ReconciliationReport:
+    """Walks every open join_requests row (of one group, or every active
+    group) and closes exactly what a Telegram probe can prove: the user is now
+    a member, the account is deleted, or the user was kicked/removed outside
+    the bot. A row that stays undetermined is kept open unless it is already
+    older than stale_days AND the probe gave a genuine non-member answer
+    (never an error) AND the row's age is actually known AND no other row in
+    the same group hit a probe error this run - in which case it is closed as
+    an honest "could not tell" outcome, never as an approval or rejection.
+    stale_days=0 disables that auto-close entirely. Every closing write is
+    conditional on the row still being open, so a decision made elsewhere
+    (a manual approve/reject/ban) while the probes were running always wins
+    and the same row is never closed twice."""
+    if stale_days is None:
+        from config import settings as _settings
+        stale_days = _settings.reconciliation_stale_days
+
+    report = ReconciliationReport()
+    now = datetime.now(timezone.utc)
+
+    group_query = select(Group).where(Group.is_active, ~Group.is_banned)
+    if group_id is not None:
+        group_query = group_query.where(Group.id == group_id)
+    groups = (await db.execute(group_query)).scalars().all()
+
+    # Phase 1 (database + one Telegram call per group): collect every open
+    # row up to the probe budget, plus the group's member count for context -
+    # never the group's pending count, which Telegram has no API to read.
+    rows: list[tuple[Group, JoinRequest]] = []
+    for g in groups:
+        report.per_group.setdefault(g.id, {
+            "title": g.title or str(g.chat_id),
+            "checked": 0, "joined": 0, "deleted": 0, "banned": 0,
+            "auto_closed_stale": 0, "undetermined": 0, "access_error": None,
+        })
+        try:
+            report.member_counts[g.id] = await _call_honouring_flood(
+                lambda chat_id=g.chat_id: bot.get_chat_member_count(chat_id)
+            )
+        except TelegramAPIError:
+            report.member_counts[g.id] = None
+
+        jr_result = await db.execute(select(JoinRequest).where(
+            JoinRequest.group_id == g.id,
+            JoinRequest.decision.in_((DecisionEnum.pending, DecisionEnum.manual_review)),
+            JoinRequest.resolved_at.is_(None),
+        ))
+        for jr in jr_result.scalars().all():
+            if len(rows) >= max_probes:
+                report.stopped_early = True
+                break
+            rows.append((g, jr))
+        if report.stopped_early:
+            break
+
+    # Phase 2 (Telegram): probe in parallel with bounded concurrency.
+    total = len(rows)
+    semaphore = asyncio.Semaphore(max(1, concurrency))
+    done = 0
+    last_progress = time.monotonic()
+
+    async def probe(g: Group, jr: JoinRequest) -> _ReconOutcome:
+        nonlocal done, last_progress
+        async with semaphore:
+            try:
+                outcome = await _probe_reconciliation_row(bot, g.chat_id, jr.user_id, dry_run)
+            except Exception:  # never let one row sink the whole sweep; the row stays open
+                logger.exception(f"reconcile: probe failed for {jr.user_id} in {g.chat_id}")
+                outcome = _ReconOutcome("undetermined", is_error=True)
+            await asyncio.sleep(0.05)
+        done += 1
+        if progress is not None and time.monotonic() - last_progress >= progress_interval:
+            last_progress = time.monotonic()
+            try:
+                await progress(done, total)
+            except Exception:
+                logger.exception("reconcile: progress callback failed")
+        return outcome
+
+    outcomes = await asyncio.gather(*(probe(g, jr) for g, jr in rows))
+
+    # A probe error anywhere in a group poisons the stale rule for the whole
+    # group this run: one network blip or one kick must never be allowed to
+    # mass-close every other aged row in that group as stale. A deleted
+    # account whose decline itself failed for a non-decisive reason (access,
+    # flood, network - not "the request is already gone") is just as much a
+    # probe error as an undetermined outcome: it stays open, so it must
+    # poison the group's stale rule too.
+    groups_with_errors = {
+        g.id for (g, jr), outcome in zip(rows, outcomes)
+        if (outcome.kind == "undetermined" and outcome.is_error)
+        or (
+            outcome.kind == "deleted" and outcome.decline_error is not None
+            and not is_request_missing_error(outcome.decline_error)
+        )
+    }
+    for gid in groups_with_errors:
+        title = report.per_group[gid]["title"]
+        if title not in report.stale_skipped_groups:
+            report.stale_skipped_groups.append(title)
+
+    # Phase 3 (database): apply the outcomes sequentially, in row order.
+    for (g, jr), outcome in zip(rows, outcomes):
+        title = g.title or str(g.chat_id)
+        stats = report.per_group[g.id]
+        report.checked += 1
+        stats["checked"] += 1
+
+        if outcome.kind == "undetermined":
+            if outcome.access_error and stats["access_error"] is None:
+                stats["access_error"] = outcome.access_error
+                report.access_errors.append((title, outcome.access_error))
+
+            if outcome.is_error:
+                # A probe failure is never evidence the user left the group -
+                # the row stays open exactly like any other undetermined row.
+                report.undetermined += 1
+                stats["undetermined"] += 1
+                continue
+
+            row_age = _row_age(jr.created_at, now)
+            if (
+                stale_days and stale_days > 0
+                and g.id not in groups_with_errors
+                and row_age is not None
+                and row_age >= timedelta(days=stale_days)
+            ):
+                if dry_run:
+                    report.auto_closed_stale.append((title, jr.user_id))
+                    stats["auto_closed_stale"] += 1
+                    continue
+                closed = await _close_row(
+                    db, jr, DecisionEnum.stale, RECON_AUTO_CLOSE_NOTE.format(days=stale_days), {
+                        "reconciliation": True, "reason": "auto_closed_stale",
+                        "stale_days": stale_days, "actor": actor_name,
+                    }, now,
+                )
+                if not closed:
+                    # A decision taken elsewhere while the probes were
+                    # running already resolved the row; it wins.
+                    continue
+                jr.reviewed_by = actor_name
+                report.auto_closed_stale.append((title, jr.user_id))
+                stats["auto_closed_stale"] += 1
+                continue
+
+            report.undetermined += 1
+            stats["undetermined"] += 1
+            continue
+
+        if outcome.kind == "joined":
+            if dry_run:
+                report.joined.append((title, jr.user_id))
+                stats["joined"] += 1
+                continue
+            closed = await _close_row(db, jr, DecisionEnum.approved, RECON_JOINED_NOTE, {
+                "reconciliation": True, "reason": "already_member",
+                "status": outcome.member_status, "actor": actor_name,
+            }, now)
+            if not closed:
+                continue
+            jr.reviewed_by = actor_name
+            await _close_sessions(db, jr.user_id, g.chat_id, now, None)
+            report.joined.append((title, jr.user_id))
+            stats["joined"] += 1
+            continue
+
+        if outcome.kind == "banned":
+            if dry_run:
+                report.banned.append((title, jr.user_id))
+                stats["banned"] += 1
+                continue
+            closed = await _close_row(db, jr, DecisionEnum.banned, RECON_BANNED_NOTE, {
+                "reconciliation": True, "reason": "kicked_outside_bot",
+                "status": outcome.member_status, "actor": actor_name,
+            }, now)
+            if not closed:
+                continue
+            jr.reviewed_by = actor_name
+            await _close_sessions(db, jr.user_id, g.chat_id, now, False)
+            report.banned.append((title, jr.user_id))
+            stats["banned"] += 1
+            continue
+
+        # outcome.kind == "deleted"
+        if dry_run:
+            report.deleted.append((title, jr.user_id))
+            stats["deleted"] += 1
+            continue
+
+        decline_error = outcome.decline_error
+        if decline_error is not None:
+            if is_request_missing_error(decline_error):
+                closed = await _close_row(db, jr, DecisionEnum.rejected, RECON_DELETED_STALE_NOTE, {
+                    "reconciliation": True, "reason": "deleted_account_request_gone",
+                    "decline_error": decline_error, "actor": actor_name,
+                }, now)
+                if closed:
+                    jr.reviewed_by = actor_name
+                    await _close_sessions(db, jr.user_id, g.chat_id, now, False)
+                    report.deleted_request_gone.append((title, jr.user_id))
+                    stats["deleted"] += 1
+            else:
+                # Nothing decisive came back (access, flood, network): the
+                # request may still be on Telegram, so the row stays open.
+                if any(marker in decline_error.lower() for marker in _ACCESS_ERROR_MARKERS):
+                    report.access_errors.append((title, decline_error))
+                report.undetermined += 1
+                stats["undetermined"] += 1
+            continue
+
+        closed = await _close_row(db, jr, DecisionEnum.rejected, RECON_DELETED_NOTE, {
+            "reconciliation": True, "reason": "deleted_account",
+            "decline_error": None, "actor": actor_name,
+        }, now)
+        if closed:
+            jr.reviewed_by = actor_name
+            await _close_sessions(db, jr.user_id, g.chat_id, now, False)
+            report.deleted.append((title, jr.user_id))
+            stats["deleted"] += 1
 
     await db.flush()
     await db.commit()

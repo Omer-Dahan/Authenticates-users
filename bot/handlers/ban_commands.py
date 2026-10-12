@@ -16,7 +16,10 @@ from sqlalchemy import select
 
 from database.session import AsyncSessionLocal
 from database.models import Group, TelegramUser, UserBan
-from moderation.actions import ban_user, unban_user, BanReport, VALID_SCOPES, purge_deleted_requests, PurgeReport
+from moderation.actions import (
+    ban_user, unban_user, BanReport, VALID_SCOPES, purge_deleted_requests, PurgeReport,
+    run_reconciliation_sweep, ReconciliationReport, RECONCILE_API_NOTE,
+)
 from bot.keyboards.settings_kb import ban_scope_picker_kb, bans_list_kb
 from bot.text import esc
 from config import settings
@@ -81,6 +84,30 @@ def _pop_pending_purge(admin_id: int) -> Optional[dict]:
     if entry is None:
         return None
     if datetime.now(timezone.utc) - entry["created_at"] > _PENDING_PURGE_TTL:
+        return None
+    return entry
+
+
+# Same one-shot binding as the purge confirm button, kept in its own dict so
+# the two features never collide on the same admin id.
+_PENDING_RECONCILES: dict[int, dict] = {}
+_PENDING_RECONCILE_TTL = timedelta(minutes=10)
+
+
+def _store_pending_reconcile(admin_id: int, group_id: Optional[int]) -> None:
+    now = datetime.now(timezone.utc)
+    expired = [key for key, entry in _PENDING_RECONCILES.items() if now - entry["created_at"] > _PENDING_RECONCILE_TTL]
+    for key in expired:
+        del _PENDING_RECONCILES[key]
+
+    _PENDING_RECONCILES[admin_id] = {"group_id": group_id, "created_at": now}
+
+
+def _pop_pending_reconcile(admin_id: int) -> Optional[dict]:
+    entry = _PENDING_RECONCILES.pop(admin_id, None)
+    if entry is None:
+        return None
+    if datetime.now(timezone.utc) - entry["created_at"] > _PENDING_RECONCILE_TTL:
         return None
     return entry
 
@@ -279,6 +306,60 @@ def format_purge_report(report: PurgeReport, applied: bool) -> str:
 
     lines.append("")
     lines.append(PURGE_API_NOTE)
+    return "\n".join(lines)
+
+
+def format_reconciliation_report(report: ReconciliationReport, applied: bool) -> str:
+    lines = [f"📦 בקשות פתוחות במסד הנתונים של הבוט: {report.checked}"]
+    lines.append(f"✅ הצטרפו לקבוצה (אושרו מחוץ לבוט): {len(report.joined)}")
+    if applied:
+        lines.append(f"🗑 חשבונות מחוקים, הבקשה נדחתה: {len(report.deleted)}")
+        lines.append(f"👻 חשבונות מחוקים, הבקשה כבר לא היתה בטלגרם: {len(report.deleted_request_gone)}")
+    else:
+        lines.append(f"🗑 חשבונות מחוקים שאותרו (יידחו רק באישור): {len(report.deleted)}")
+    lines.append(f"🔨 חסומים או הוסרו מהקבוצה מחוץ לבוט: {len(report.banned)}")
+    if applied:
+        lines.append(f"🕓 נסגרו אוטומטית בגלל גיל, מצבם לא ידוע: {len(report.auto_closed_stale)}")
+    else:
+        lines.append(f"🕓 יסגרו אוטומטית בגלל גיל (רק באישור), מצבם לא ידוע: {len(report.auto_closed_stale)}")
+    lines.append(f"❓ לא ניתן לקבוע את מצבם, נשארו פתוחים: {report.undetermined}")
+    if report.access_errors:
+        lines.append("⚠️ בעיית גישה:")
+        seen = set()
+        for title, err in report.access_errors:
+            if title in seen:
+                continue
+            seen.add(title)
+            lines.append(f"  • {esc(title)}: {esc(err)}")
+    if report.stale_skipped_groups:
+        lines.append(
+            "⚠️ בגלל שגיאת בדיקה, לא נסגרו שורות \"לא ידוע\" בגלל גיל בקבוצות: "
+            + ", ".join(esc(t) for t in report.stale_skipped_groups)
+        )
+    if report.stopped_early:
+        lines.append(f"⏹ הבדיקה נעצרה אחרי {report.checked} בדיקות (הגעה למגבלה).")
+
+    if report.per_group:
+        lines.append("")
+        lines.append("📍 <b>פירוט לפי קבוצה:</b>")
+        for key, stats in report.per_group.items():
+            member_count = report.member_counts.get(key)
+            count_display = member_count if member_count is not None else "לא ידוע"
+            lines.append(f"\n<b>{esc(stats.get('title', key))}</b> (חברים בקבוצה: {count_display})")
+            lines.append(
+                f"  נבדקו: {stats['checked']} | הצטרפו: {stats['joined']} | "
+                f"מחוקים: {stats['deleted']} | חסומים: {stats['banned']}"
+            )
+            stale_label = "נסגרו אוטומטית (גיל)" if applied else "יסגרו אוטומטית (גיל)"
+            lines.append(
+                f"  {stale_label}: {stats['auto_closed_stale']} | "
+                f"לא ידוע: {stats['undetermined']}"
+            )
+            if stats.get("access_error"):
+                lines.append(f"  ⚠️ שגיאת גישה: {esc(stats['access_error'])}")
+
+    lines.append("")
+    lines.append(RECONCILE_API_NOTE)
     return "\n".join(lines)
 
 
@@ -624,3 +705,107 @@ async def cb_purge_apply(callback: CallbackQuery, bot: Bot) -> None:
         return f"🧹 <b>הסרה בוצעה</b>\n\n{format_purge_report(report, applied=True)}", None
 
     start_purge_task(callback.message, actor_id, "🧹 <b>הסרת בקשות של חשבונות מחוקים</b>", sweep, bot)
+
+
+# ─── /reconcile: reconciliation sweep across every group (owner-only) ────────
+
+def _reconcile_can_apply(report: ReconciliationReport) -> bool:
+    return bool(report.joined or report.deleted or report.banned or report.auto_closed_stale)
+
+
+@router.message(Command("reconcile"))
+async def cmd_reconcile(message: Message, bot: Bot) -> None:
+    if not _is_super_admin(message.from_user.id):
+        await message.reply("⛔ אין לך הרשאה לבצע פעולה זו.")
+        return
+
+    admin_id = message.from_user.id
+    actor_name = message.from_user.username or str(message.from_user.id)
+
+    try:
+        async with AsyncSessionLocal() as db:
+            report = await run_reconciliation_sweep(
+                bot, group_id=None, dry_run=True, actor_name=actor_name, db=db,
+            )
+    except Exception:
+        logger.exception("reconcile dry run failed")
+        _PENDING_RECONCILES.pop(admin_id, None)
+        await message.reply("❌ הבדיקה נכשלה באמצע. אפשר להריץ /reconcile שוב.")
+        return
+
+    reply_markup = None
+    if _reconcile_can_apply(report):
+        _store_pending_reconcile(admin_id, None)
+        builder = InlineKeyboardBuilder()
+        builder.row(InlineKeyboardButton(text="✅ אשר וסגור", callback_data="recon:apply:all"))
+        reply_markup = builder.as_markup()
+        footer = "בדיקה בלבד, עדיין לא נסגר דבר. לחץ על <b>אשר וסגור</b> כדי לבצע."
+    else:
+        _PENDING_RECONCILES.pop(admin_id, None)
+        footer = "אין מה לסגור."
+
+    await message.reply(
+        f"🔁 <b>בדיקת התאמה מול טלגרם, כל הקבוצות</b>\n\n"
+        f"{format_reconciliation_report(report, applied=False)}\n\n{footer}",
+        parse_mode="HTML",
+        reply_markup=reply_markup,
+    )
+
+
+@router.callback_query(F.data.startswith("recon:apply"))
+async def cb_reconcile_apply(callback: CallbackQuery, bot: Bot) -> None:
+    if not _is_super_admin(callback.from_user.id):
+        await safe_answer(callback, "⛔ אין הרשאה.", show_alert=True)
+        return
+
+    if purge_in_progress(callback.from_user.id):
+        await safe_answer(callback, "בדיקה אחרת עדיין רצה. ההודעה שלה תתעדכן בסיום.", show_alert=True)
+        return
+
+    # The scope travels with the button: a bare legacy "recon:apply" (an old
+    # message from before this check existed) carries no scope at all and is
+    # refused outright rather than trusted against whatever happens to be
+    # pending for this admin right now - same rule as cb_purge_apply.
+    parts = callback.data.split(":")
+    if len(parts) != 3:
+        await safe_answer(callback, "הכפתור הזה ישן. יש להריץ /reconcile מחדש.", show_alert=True)
+        return
+    scope_token = parts[2]
+    if scope_token == "all":
+        button_group_id = None
+    else:
+        try:
+            button_group_id = int(scope_token)
+        except ValueError:
+            await safe_answer(callback, "כפתור לא תקין.", show_alert=True)
+            return
+
+    # One-shot: the record is consumed here regardless of outcome, so a stale
+    # or mismatched button can never be retried against a newer dry run.
+    pending = _pop_pending_reconcile(callback.from_user.id)
+    if pending is None:
+        await safe_answer(callback, "הבדיקה פגה או שכבר בוצעה. יש להריץ /reconcile מחדש.", show_alert=True)
+        return
+    if pending["group_id"] != button_group_id:
+        await safe_answer(
+            callback,
+            "הכפתור הזה שייך לבדיקה אחרת מזו שמוצגת כרגע. יש להריץ בדיקה חדשה וללחוץ על הכפתור שלה.",
+            show_alert=True,
+        )
+        return
+
+    await safe_answer(callback, "הסגירה התחילה. ההודעה תתעדכן בסיום.")
+
+    actor_id = callback.from_user.id
+    actor_name = callback.from_user.username or str(callback.from_user.id)
+
+    async def sweep(progress):
+        async with AsyncSessionLocal() as db:
+            report = await run_reconciliation_sweep(
+                bot, group_id=pending["group_id"], dry_run=False,
+                actor_name=actor_name, db=db,
+                progress=progress, progress_interval=_PURGE_PROGRESS_INTERVAL,
+            )
+        return f"🔁 <b>התאמה בוצעה</b>\n\n{format_reconciliation_report(report, applied=True)}", None
+
+    start_purge_task(callback.message, actor_id, "🔁 <b>התאמה מול טלגרם, כל הקבוצות</b>", sweep, bot)

@@ -14,6 +14,11 @@ class DecisionEnum(str, enum.Enum):
     pending = "pending"
     banned = "banned"
     manual_review = "manual_review"
+    # A reconciliation sweep could not prove any outcome for this row and it
+    # aged past the stale window, so it was closed honestly as "we could not
+    # tell" instead of being left open forever or misreported as approved or
+    # rejected. See moderation/actions.py (run_reconciliation_sweep).
+    stale = "stale"
 
 
 class SecurityModeEnum(str, enum.Enum):
