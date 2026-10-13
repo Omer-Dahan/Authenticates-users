@@ -26,7 +26,7 @@ def main_settings_kb(group_id: int) -> InlineKeyboardMarkup:
         InlineKeyboardButton(text="🔔 התראות סקירה ידנית", callback_data=f"sm:notify:{g}"),
     )
     builder.row(
-        InlineKeyboardButton(text="🧹 ממתינים של חשבונות מחוקים", callback_data=f"sm:purge:{g}"),
+        InlineKeyboardButton(text="🧹 שורות פתוחות של חשבונות מחוקים", callback_data=f"sm:purge:{g}"),
     )
     builder.row(
         InlineKeyboardButton(text="🔁 התאמה מול טלגרם", callback_data=f"sm:reconcile_menu:{g}"),

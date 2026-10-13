@@ -307,10 +307,10 @@ authorization independently.
    is pressed, the press is refused instead of running against the wrong
    scope.
 2. The super-admin panel (`bot/handlers/superadmin.py`) has a
-   "🧹 ממתינים של חשבונות מחוקים" button (`sa:purge_prompt`) that runs the
+   "🧹 שורות פתוחות של חשבונות מחוקים" button (`sa:purge_prompt`) that runs the
    same dry run across every group and shows the same `purge:apply:all`
    confirm button.
-3. The group settings menu (`/settings` → "🧹 ממתינים של חשבונות מחוקים",
+3. The group settings menu (`/settings` → "🧹 שורות פתוחות של חשבונות מחוקים",
    `sm:purge:<group_id>` in `bot/handlers/settings_menu.py`): a dry run
    scoped to that one group, for the same people who can open that group's
    screen (the group owner or an admin registered for that group via

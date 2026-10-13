@@ -260,7 +260,7 @@ async def cb_purge_menu(callback: CallbackQuery, bot: Bot) -> None:
 
     admin_id = callback.from_user.id
     actor_name = callback.from_user.username or str(callback.from_user.id)
-    header = f"🧹 <b>חשבונות מחוקים בבקשות ממתינות: {esc(group.title)}</b>"
+    header = f"🧹 <b>חשבונות מחוקים בשורות פתוחות אצל הבוט: {esc(group.title)}</b>"
 
     async def sweep(progress):
         # First press: a dry run scoped to this group only. Nothing is declined
@@ -533,7 +533,10 @@ async def cb_stats(callback: CallbackQuery) -> None:
             )
             counts[decision] = count or 0
 
-        total = sum(counts.values())
+        # Pending rows are excluded from the total: the bot cannot prove that
+        # count against Telegram's own list, so it must not appear even
+        # implicitly inside a sum.
+        total = sum(c for d, c in counts.items() if d != DecisionEnum.pending)
         approved = counts[DecisionEnum.approved]
         rate = f"{approved / total * 100:.1f}%" if total else "-"
 
@@ -545,7 +548,6 @@ async def cb_stats(callback: CallbackQuery) -> None:
         f"🔨 חסומים: {counts[DecisionEnum.banned]}\n"
         f"🔓 חשבון מחוק, נוקה באמצעות חסימה: {counts[DecisionEnum.cleared_via_ban]}\n"
         f"👀 סקירה ידנית: {counts[DecisionEnum.manual_review]}\n"
-        f"⏳ ממתינים: {counts[DecisionEnum.pending]}\n"
         f"🕓 נסגרו אוטומטית (גיל, לא ידוע): {counts[DecisionEnum.stale]}\n"
         f"─────────────────\n"
         f"סה\"כ: {total} | אחוז אישור: {rate}"

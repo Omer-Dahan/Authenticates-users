@@ -1,7 +1,7 @@
 import pytest
 from sqlalchemy import select
-from database.models import GroupConfig, Group
-from bot.handlers.settings_menu import cb_notify_menu, cb_set_notify
+from database.models import DecisionEnum, GroupConfig, Group, JoinRequest, TelegramUser
+from bot.handlers.settings_menu import cb_notify_menu, cb_set_notify, cb_stats
 from tests.conftest import make_callback_query, make_tg_user
 
 
@@ -166,3 +166,39 @@ async def test_cb_set_notify_invalid_state(test_session_factory, sample_group, d
             )
         )
         assert res.scalar_one_or_none() is None
+
+
+@pytest.mark.asyncio
+async def test_cb_stats_never_shows_a_pending_count(test_session_factory, sample_group, db_session):
+    """The bot has no way to know Telegram's real pending count (it is told
+    nothing on approve/decline in-app, and no API lists it), so the stats
+    screen must not present its own open-row count as if it were that
+    number - not as a labeled line, and not hidden inside the total."""
+    rows = [
+        (9001, DecisionEnum.approved),
+        (9002, DecisionEnum.rejected),
+        (9003, DecisionEnum.banned),
+        (9004, DecisionEnum.pending),
+        (9005, DecisionEnum.pending),
+        (9006, DecisionEnum.pending),
+    ]
+    for user_id, decision in rows:
+        db_session.add(TelegramUser(telegram_id=user_id, first_name="Dana"))
+        db_session.add(JoinRequest(
+            group_id=sample_group.id, user_id=user_id, chat_id=sample_group.chat_id,
+            decision=decision, score=10.0, matched_rules=[],
+        ))
+    await db_session.commit()
+
+    cb = make_callback_query(f"sm:stats:{sample_group.id}")
+    await cb_stats(cb)
+
+    cb.answer.assert_awaited_once()
+    args, _ = cb.message.edit_text.call_args
+    text = args[0]
+
+    assert "ממתינים" not in text
+    assert "⏳" not in text
+    # Three provable rows (approved/rejected/banned); the three pending rows
+    # must not be folded into the total either.
+    assert "סה\"כ: 3" in text

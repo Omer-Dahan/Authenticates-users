@@ -87,7 +87,7 @@ async def cmd_admin(message: Message) -> None:
         InlineKeyboardButton(text="🚫 חסימות", callback_data="sa:bans"),
     )
     builder.row(
-        InlineKeyboardButton(text="🧹 ממתינים של חשבונות מחוקים", callback_data="sa:purge_prompt"),
+        InlineKeyboardButton(text="🧹 שורות פתוחות של חשבונות מחוקים", callback_data="sa:purge_prompt"),
     )
     builder.row(
         InlineKeyboardButton(text="🔁 התאמה מול טלגרם, כל הקבוצות", callback_data="sa:reconcile_prompt"),
@@ -134,7 +134,7 @@ async def cb_admin_main(callback: CallbackQuery) -> None:
         InlineKeyboardButton(text="🚫 חסימות", callback_data="sa:bans"),
     )
     builder.row(
-        InlineKeyboardButton(text="🧹 ממתינים של חשבונות מחוקים", callback_data="sa:purge_prompt"),
+        InlineKeyboardButton(text="🧹 שורות פתוחות של חשבונות מחוקים", callback_data="sa:purge_prompt"),
     )
     builder.row(
         InlineKeyboardButton(text="🔁 התאמה מול טלגרם, כל הקבוצות", callback_data="sa:reconcile_prompt"),
@@ -360,7 +360,7 @@ async def cb_purge_prompt(callback: CallbackQuery, bot: Bot) -> None:
 
     admin_id = callback.from_user.id
     actor_name = callback.from_user.username or str(callback.from_user.id)
-    header = "🧹 <b>בקשות ממתינות של חשבונות מחוקים</b>"
+    header = "🧹 <b>שורות פתוחות של חשבונות מחוקים</b>"
 
     back = InlineKeyboardBuilder()
     back.row(InlineKeyboardButton(text="◀️ חזרה", callback_data="sa:main"))
