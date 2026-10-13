@@ -202,3 +202,48 @@ async def test_cb_stats_never_shows_a_pending_count(test_session_factory, sample
     # Three provable rows (approved/rejected/banned); the three pending rows
     # must not be folded into the total either.
     assert "סה\"כ: 3" in text
+
+
+@pytest.mark.asyncio
+async def test_cb_stats_shows_real_pending_next_to_open_rows(
+    test_session_factory, sample_group, db_session, monkeypatch,
+):
+    """When a fresh real count is cached, the stats screen shows it next to
+    the bot's own open-row count, clearly attributed, and still never folds
+    either number into the totals line."""
+    db_session.add(TelegramUser(telegram_id=9007, first_name="Dana"))
+    db_session.add(JoinRequest(
+        group_id=sample_group.id, user_id=9007, chat_id=sample_group.chat_id,
+        decision=DecisionEnum.pending, score=10.0, matched_rules=[],
+    ))
+    await db_session.commit()
+
+    import bot.handlers.settings_menu as settings_menu_module
+    monkeypatch.setattr(settings_menu_module, "get_cached_pending_count", lambda chat_id: 31)
+
+    cb = make_callback_query(f"sm:stats:{sample_group.id}")
+    await cb_stats(cb)
+
+    args, _ = cb.message.edit_text.call_args
+    text = args[0]
+
+    assert "⏳ בקשות ממתינות לפי טלגרם: 31" in text
+    assert "🧾 שורות פתוחות אצלנו: 1" in text
+    assert "סה\"כ: 0" in text
+
+
+@pytest.mark.asyncio
+async def test_cb_stats_omits_real_pending_line_when_no_cached_value(
+    test_session_factory, sample_group, db_session, monkeypatch,
+):
+    import bot.handlers.settings_menu as settings_menu_module
+    monkeypatch.setattr(settings_menu_module, "get_cached_pending_count", lambda chat_id: None)
+
+    cb = make_callback_query(f"sm:stats:{sample_group.id}")
+    await cb_stats(cb)
+
+    args, _ = cb.message.edit_text.call_args
+    text = args[0]
+
+    assert "⏳" not in text
+    assert "לפי טלגרם" not in text

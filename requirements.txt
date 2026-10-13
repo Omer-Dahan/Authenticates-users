@@ -16,3 +16,7 @@ pydantic-settings>=2.0.0
 
 # Logging
 structlog==24.4.0
+
+# MTProto read-only client, used only to read the real pending-join-request
+# count (ChannelFull.requests_pending) - the Bot API cannot expose it.
+telethon==1.44.0

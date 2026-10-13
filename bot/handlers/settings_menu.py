@@ -29,6 +29,7 @@ from moderation.actions import (
     ban_user, BanReport, purge_deleted_requests, is_request_missing_error,
     run_reconciliation_sweep,
 )
+from telegram_mtproto.pending_cache import get_cached_pending_count
 from config import settings
 from logs import get_logger
 
@@ -552,6 +553,24 @@ async def cb_stats(callback: CallbackQuery) -> None:
         f"─────────────────\n"
         f"סה\"כ: {total} | אחוז אישור: {rate}"
     )
+
+    # The real count comes straight from Telegram (MTProto, read-only - see
+    # telegram_mtproto/) and is shown next to the bot's own open-row count,
+    # never folded into either number above: the bot cannot tell which of
+    # its own open rows correspond to Telegram's count, only that a gap
+    # between them is made of requests resolved outside the bot (approved or
+    # declined by an admin directly in the Telegram app). Omitted entirely
+    # when no fresh value is cached (feature off, or not fetched yet).
+    real_pending = get_cached_pending_count(group.chat_id) if group is not None else None
+    if real_pending is not None:
+        open_rows = counts[DecisionEnum.pending]
+        text += (
+            f"\n─────────────────\n"
+            f"⏳ בקשות ממתינות לפי טלגרם: {real_pending}\n"
+            f"🧾 שורות פתוחות אצלנו: {open_rows}\n"
+            f"ℹ️ ההפרש מורכב מבקשות שהוכרעו מחוץ לבוט, ישירות באפליקציית טלגרם."
+        )
+
     await callback.message.edit_text(text, parse_mode="HTML", reply_markup=back_to_main_kb(group_id))
     await callback.answer()
 

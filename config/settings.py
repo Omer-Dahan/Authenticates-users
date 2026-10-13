@@ -44,6 +44,15 @@ class Settings(BaseSettings):
     reconciliation_daily_sweep_enabled: bool = Field(default=True, env="RECONCILIATION_DAILY_SWEEP_ENABLED")
     reconciliation_daily_interval_seconds: int = Field(default=86400, env="RECONCILIATION_DAILY_INTERVAL_SECONDS")
 
+    # Real pending-join-request count, read directly from Telegram over
+    # MTProto (see telegram_mtproto/). Optional: without API_ID/API_HASH or
+    # the telethon package installed, this feature is simply off - no crash,
+    # just one log line at startup (see telegram_mtproto/pending_counts.py).
+    telegram_api_id: Optional[int] = Field(default=None, env="TELEGRAM_API_ID")
+    telegram_api_hash: Optional[str] = Field(default=None, env="TELEGRAM_API_HASH")
+    telegram_pending_enabled: bool = Field(default=True, env="TELEGRAM_PENDING_ENABLED")
+    telegram_pending_refresh_seconds: int = Field(default=600, env="TELEGRAM_PENDING_REFRESH_SECONDS")
+
     model_config = {
         "env_file": ".env",
         "env_file_encoding": "utf-8",

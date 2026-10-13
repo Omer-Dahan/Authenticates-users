@@ -19,6 +19,8 @@ from database.session import AsyncSessionLocal
 from moderation import ModerationEngine
 from verification import VerificationEngine, start_cleanup_loop
 from recovery import detect_outage, start_heartbeat_loop, run_recovery_sweep, start_daily_reconciliation_loop
+from telegram_mtproto.pending_cache import start_pending_refresh_loop
+from telegram_mtproto.pending_counts import close_client as close_mtproto_client
 
 from bot.handlers import join_requests, verification, setup, settings_menu, member_events
 from bot.handlers import rules_menu, questions_menu, lists_menu, superadmin, start, ban_commands
@@ -104,16 +106,24 @@ async def main() -> None:
         bot, recovery_done_event=recovery_done_event,
     ))
 
-    await dp.start_polling(
-        bot,
-        allowed_updates=[
-            "message",
-            "callback_query",
-            "chat_join_request",
-            "my_chat_member",
-            "chat_member",
-        ],
-    )
+    # Real pending-request counts read from Telegram over MTProto (read-only,
+    # see telegram_mtproto/). A no-op when the package or credentials are
+    # missing - start_pending_refresh_loop logs that and returns on its own.
+    asyncio.create_task(start_pending_refresh_loop())
+
+    try:
+        await dp.start_polling(
+            bot,
+            allowed_updates=[
+                "message",
+                "callback_query",
+                "chat_join_request",
+                "my_chat_member",
+                "chat_member",
+            ],
+        )
+    finally:
+        await close_mtproto_client()
 
 
 if __name__ == "__main__":
