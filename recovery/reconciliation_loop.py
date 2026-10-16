@@ -1,7 +1,9 @@
 """Background loop that quietly reconciles join_requests rows against what
 Telegram can actually confirm, once a day for every group that has not opted
-out. Stays silent unless a sweep actually closes something, in which case the
-bot owner gets the same honest report the on-demand entry points produce.
+out. Always runs and closes what it can prove, but never messages the owner
+about it unless settings.reconciliation_daily_notify is explicitly turned on
+(default: off). The same honest report stays available on demand via the
+/reconcile command and the per-group settings button.
 """
 import asyncio
 
@@ -87,15 +89,26 @@ async def run_daily_reconciliation(bot: Bot) -> None:
                 logger.exception("daily reconciliation: sweep failed", group_id=group_id)
                 continue
 
-            # Stay silent only when the sweep both closed nothing AND has
-            # nothing to disclose via stale_skipped_groups. That second
-            # condition only ever fires when reconciliation_stale_days > 0
-            # (see run_reconciliation_sweep): with the config default of 0,
-            # a group stuck entirely behind deleted_failed/race_lost rows
+            # The sweep above already ran and closed whatever it could
+            # prove, regardless of anything below this point. Whether the
+            # owner also gets a message about it is a separate decision,
+            # gated entirely on reconciliation_daily_notify (default: off -
+            # see config/settings.py). With the default, this loop sends
+            # nothing at all, no matter what the sweep closed; the same
+            # report stays available on demand via /reconcile and the
+            # per-group settings button.
+            if not settings.reconciliation_daily_notify:
+                continue
+
+            # Even with notifications on, stay silent when the sweep both
+            # closed nothing AND has nothing to disclose via
+            # stale_skipped_groups. That second condition only ever fires
+            # when reconciliation_stale_days > 0 (see
+            # run_reconciliation_sweep): with the config default of 0, a
+            # group stuck entirely behind deleted_failed/race_lost rows
             # closes nothing and reports no stale_skipped_groups either, so
-            # this check does NOT notify the owner for it - it stays silent
-            # in this daily loop and is visible only through a manual
-            # /reconcile report.
+            # this check does NOT notify the owner for it - it is visible
+            # only through a manual /reconcile report.
             if _closed_count(report) == 0 and not report.stale_skipped_groups:
                 continue
 

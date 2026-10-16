@@ -43,6 +43,13 @@ class Settings(BaseSettings):
     reconciliation_stale_days: int = Field(default=0, env="RECONCILIATION_STALE_DAYS")
     reconciliation_daily_sweep_enabled: bool = Field(default=True, env="RECONCILIATION_DAILY_SWEEP_ENABLED")
     reconciliation_daily_interval_seconds: int = Field(default=86400, env="RECONCILIATION_DAILY_INTERVAL_SECONDS")
+    # The daily sweep never messages the owner unless this is explicitly
+    # turned on. The sweep itself always runs on its normal schedule and
+    # closes whatever it can prove, regardless of this setting - this only
+    # controls whether it also sends a report about what it closed. On-demand
+    # reports (the /reconcile command and the per-group settings button)
+    # always work and are unaffected by this flag.
+    reconciliation_daily_notify: bool = Field(default=False, env="RECONCILIATION_DAILY_NOTIFY")
 
     # Real pending-join-request count, read directly from Telegram over
     # MTProto (see telegram_mtproto/). Optional: without API_ID/API_HASH or

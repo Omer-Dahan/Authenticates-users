@@ -402,19 +402,24 @@ place, never duplicated.
 ### Entry points
 
 Same dry-run-then-confirm pattern as the purge above: `/reconcile` in
-`bot/handlers/ban_commands.py` (super-admin, every group), the per-group
+`bot/handlers/ban_commands.py` (super-admin, every group) and the per-group
 settings screen (`sm:reconcile:<group_id>` / `sm:reconcile_apply:<group_id>`
-in `bot/handlers/settings_menu.py`), and the daily background loop
-(`recovery/reconciliation_loop.py::run_daily_reconciliation`, guarded so two
-sweeps can never run at once in this process, and notifying the owner only
-when a sweep actually closed something or has something to disclose via
-`stale_skipped_groups`). `stale_skipped_groups` is only ever populated when
-`reconciliation_stale_days` is above its config default of 0 (see "No
-auto-close by age, by default" above) - with the default, a group stuck
-entirely behind `deleted_failed` or `race_lost` rows closes nothing and
+in `bot/handlers/settings_menu.py`). These two on-demand reports are the only
+way to see a reconciliation report.
+
+The daily background loop (`recovery/reconciliation_loop.py::run_daily_reconciliation`,
+guarded so two sweeps can never run at once in this process) always runs on
+its normal schedule and closes whatever it can prove, but it never messages
+the owner about it - `reconciliation_daily_notify` (`config/settings.py`)
+defaults to off. An admin who explicitly wants the daily sweep to also notify
+the owner can set `RECONCILIATION_DAILY_NOTIFY=true`; even then, the loop
+notifies only when a sweep actually closed something or has something to
+disclose via `stale_skipped_groups`. `stale_skipped_groups` is only ever
+populated when `reconciliation_stale_days` is above its config default of 0
+(see "No auto-close by age, by default" above) - with that default, a group
+stuck entirely behind `deleted_failed` or `race_lost` rows closes nothing and
 reports no `stale_skipped_groups` either, so the daily loop stays silent
-about it. Such a group is visible only through a manual `/reconcile` report,
-never through the daily owner notification.
+about it regardless of the notify flag.
 
 ## Known limitation: `verification/cleanup.py` is not race-safe the way the purge and reconciliation sweep are
 

@@ -460,6 +460,47 @@ async def test_stale_window_zero_never_reports_stale_skipped_groups(
 
 
 @pytest.mark.asyncio
+async def test_daily_loop_sends_nothing_by_default_even_when_it_closes_rows(
+    sample_group, db_session, mock_bot, monkeypatch,
+):
+    """The owner asked for the automatic daily message to stop. With the
+    default settings, a daily pass that actually closes rows must still
+    send nothing at all - no message, no leftover call - even though the
+    sweep itself keeps closing what it can prove."""
+    from config import settings
+    monkeypatch.setattr(settings, "super_admin_id", 1)
+    monkeypatch.setattr(settings, "reconciliation_daily_notify", False)
+    await _open_row(db_session, sample_group, 9061)
+    mock_bot.get_chat_member.return_value = _member(9061)
+    mock_bot.send_message.reset_mock()
+
+    await run_daily_reconciliation(mock_bot)
+
+    mock_bot.send_message.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_daily_loop_notifies_owner_when_flag_explicitly_enabled(
+    sample_group, db_session, mock_bot, monkeypatch,
+):
+    """An admin who explicitly opts in via reconciliation_daily_notify still
+    gets the report when a sweep closes something."""
+    from config import settings
+    monkeypatch.setattr(settings, "super_admin_id", 1)
+    monkeypatch.setattr(settings, "reconciliation_daily_notify", True)
+    await _open_row(db_session, sample_group, 9062)
+    mock_bot.get_chat_member.return_value = _member(9062)
+    mock_bot.send_message.reset_mock()
+
+    await run_daily_reconciliation(mock_bot)
+
+    mock_bot.send_message.assert_called_once()
+    args, kwargs = mock_bot.send_message.call_args
+    assert args[0] == 1
+    assert "בדיקת התאמה יומית" in args[1]
+
+
+@pytest.mark.asyncio
 async def test_reconcile_menu_text_says_rule_is_off_instead_of_quoting_zero_days(
     sample_group, db_session, monkeypatch,
 ):
